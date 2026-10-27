@@ -1,4 +1,3 @@
-
 package com.orbitalnet.core;
 
 import org.junit.jupiter.api.Test;
@@ -21,26 +20,26 @@ class SimulationRunTest {
     }
 
     private Scenario createScenarioWithObject() {
-    ScenarioGenerationConfig config =
-            new ScenarioGenerationConfig(
-                    1, 0, -100, 100, -1, 1, 1.0, 1.0);
+        ScenarioGenerationConfig config =
+                new ScenarioGenerationConfig(
+                        1, 0, -100, 100, -1, 1, 1.0, 1.0);
 
-    InitialObjectState initialState = new InitialObjectState(
-            "SAT-01",
-            SpaceObject.ObjectType.SATELLITE,
-            new Vector3D(10, 20, 30),
-            new Vector3D(1, 0, 0),
-            1.0,
-            SpaceObject.Status.ACTIVE,
-            "Test Satellite",
-            null);
+        InitialObjectState initialState = new InitialObjectState(
+                "SAT-01",
+                SpaceObject.ObjectType.SATELLITE,
+                new Vector3D(10, 20, 30),
+                new Vector3D(1, 0, 0),
+                1.0,
+                SpaceObject.Status.ACTIVE,
+                "Test Satellite",
+                null);
 
-    return new Scenario(
-            "SCENARIO-2",
-            config,
-            42L,
-            java.util.Collections.singletonList(initialState),
-            Scenario.Status.READY);
+        return new Scenario(
+                "SCENARIO-2",
+                config,
+                42L,
+                java.util.Collections.singletonList(initialState),
+                Scenario.Status.READY);
     }
 
     @Test
@@ -105,6 +104,30 @@ class SimulationRunTest {
         run.complete();
 
         assertThrows(IllegalStateException.class, run::fail);
+    }
+
+    @Test
+    void shouldRejectFailingAlreadyFailedRun() {
+        SimulationRun run = new SimulationRun(
+                "RUN-7", createScenario(), null, null);
+
+        run.fail();
+        assertEquals(SimulationRun.Status.FAILED, run.getStatus());
+
+        IllegalStateException ex = assertThrows(
+                IllegalStateException.class, run::fail);
+        assertEquals("Only a PENDING or RUNNING run can be failed.", ex.getMessage());
+
+        // Also verify for a run that failed while RUNNING
+        SimulationRun runningFailedRun = new SimulationRun(
+                "RUN-8", createScenario(), null, null);
+        runningFailedRun.start();
+        runningFailedRun.fail();
+        assertEquals(SimulationRun.Status.FAILED, runningFailedRun.getStatus());
+
+        IllegalStateException runningEx = assertThrows(
+                IllegalStateException.class, runningFailedRun::fail);
+        assertEquals("Only a PENDING or RUNNING run can be failed.", runningEx.getMessage());
     }
 
     @Test
@@ -192,7 +215,6 @@ class SimulationRunTest {
                         .getPosition());
     }
 
-
     @Test
     void shouldMoveObjectsWhenAdvancingTick() {
         SimulationRun run = new SimulationRun(
@@ -208,7 +230,6 @@ class SimulationRunTest {
         assertEquals(1, run.getCurrentTick());
         assertEquals(5.0, run.getElapsedTimeSeconds());
     }
-
 
     @Test
     void shouldCompleteRunAtSimulationHorizon() {

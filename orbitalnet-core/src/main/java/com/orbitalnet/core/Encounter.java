@@ -1,4 +1,3 @@
-
 package com.orbitalnet.core;
 
 import java.util.Objects;
@@ -22,6 +21,7 @@ public final class Encounter {
     private double timeToClosestApproachSeconds;
     private double relativeVelocityKmPerSec;
     private Status status;
+    private RiskScore riskScore;
 
     public Encounter(
             String encounterId,
@@ -77,6 +77,7 @@ public final class Encounter {
         this.relativeVelocityKmPerSec = relativeVelocityKmPerSec;
         this.detectedAtTick = detectedAtTick;
         this.status = Status.DETECTED;
+        this.riskScore = null;
     }
 
     private void validateMeasurements(
@@ -138,6 +139,14 @@ public final class Encounter {
         return status;
     }
 
+    public RiskScore getRiskScore() {
+        return riskScore;
+    }
+
+    public RiskScore getLatestRiskScore() {
+        return riskScore;
+    }
+
     public void updateMeasurements(
             double separationKm,
             double timeToClosestApproachSeconds,
@@ -156,6 +165,23 @@ public final class Encounter {
         this.minSeparationKm = separationKm;
         this.timeToClosestApproachSeconds = timeToClosestApproachSeconds;
         this.relativeVelocityKmPerSec = relativeVelocityKmPerSec;
+
+        if (this.riskScore != null) {
+            this.riskScore = RiskScore.calculate(
+                    separationKm,
+                    relativeVelocityKmPerSec,
+                    timeToClosestApproachSeconds);
+        }
+    }
+
+    public void updateRiskScore(RiskScore riskScore) {
+        if (status == Status.RESOLVED) {
+            throw new IllegalStateException(
+                    "A resolved encounter cannot be updated.");
+        }
+
+        this.riskScore = Objects.requireNonNull(
+                riskScore, "Risk score cannot be null.");
     }
 
     public void assess() {
@@ -165,6 +191,23 @@ public final class Encounter {
         }
 
         status = Status.ASSESSED;
+        if (this.riskScore == null) {
+            this.riskScore = RiskScore.calculate(
+                    minSeparationKm,
+                    relativeVelocityKmPerSec,
+                    timeToClosestApproachSeconds);
+        }
+    }
+
+    public void assess(RiskScore riskScore) {
+        if (status != Status.DETECTED) {
+            throw new IllegalStateException(
+                    "Only a detected encounter can be assessed.");
+        }
+
+        status = Status.ASSESSED;
+        this.riskScore = Objects.requireNonNull(
+                riskScore, "Risk score cannot be null.");
     }
 
     public void mitigate() {
@@ -175,7 +218,6 @@ public final class Encounter {
 
         status = Status.MITIGATED;
     }
-
 
     public void resolve() {
         if (status == Status.RESOLVED) {

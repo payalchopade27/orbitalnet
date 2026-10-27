@@ -1,4 +1,3 @@
-
 package com.orbitalnet.core;
 
 import org.junit.jupiter.api.Test;
@@ -108,5 +107,15 @@ class EncounterDetectionServiceTest {
     @Test
     void shouldReturnNoResultsForEmptyInput() {
         assertTrue(service.detect(Collections.emptyList()).isEmpty());
+    }
+
+    @Test
+    void shouldReturnNoResultsForSingleObjectInput() {
+        Satellite singleSatellite = satellite("SAT-01", 0, 1.0, SpaceObject.Status.ACTIVE);
+        List<EncounterDetectionService.DetectedEncounter> results =
+                service.detect(Collections.singletonList(singleSatellite));
+
+        assertNotNull(results);
+        assertTrue(results.isEmpty());
     }
 }

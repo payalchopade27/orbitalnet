@@ -1,4 +1,3 @@
-
 package com.orbitalnet.core;
 
 import org.junit.jupiter.api.Test;
@@ -226,6 +225,30 @@ class EncounterTrackerTest {
                 currentObjects("A", "B"));
 
         assertNotEquals(Encounter.Status.RESOLVED, encounter.getStatus());
+    }
+
+    @Test
+    void shouldRejectDuplicateDetectionsForSamePairInSameTick() {
+        EncounterTracker tracker = new EncounterTracker("RUN-1");
+
+        EncounterDetectionService.DetectedEncounter det1 = detectPair("A", "B").get(0);
+        EncounterDetectionService.DetectedEncounter det2 = detectPair("A", "B").get(0);
+
+        IllegalArgumentException exception = assertThrows(
+                IllegalArgumentException.class,
+                () -> tracker.processTick(0, List.of(det1, det2), currentObjects("A", "B"))
+        );
+        assertEquals("Duplicate detection for the same object pair in one tick.", exception.getMessage());
+
+        // Also verify when duplicate detection has reversed object order
+        EncounterDetectionService.DetectedEncounter detForward = detectPair("A", "B").get(0);
+        EncounterDetectionService.DetectedEncounter detReversed = detectPair("B", "A").get(0);
+
+        IllegalArgumentException reversedException = assertThrows(
+                IllegalArgumentException.class,
+                () -> tracker.processTick(0, List.of(detForward, detReversed), currentObjects("A", "B"))
+        );
+        assertEquals("Duplicate detection for the same object pair in one tick.", reversedException.getMessage());
     }
 
 }
