@@ -1,4 +1,3 @@
-
 package backend;
 
 import java.util.Map;
@@ -18,19 +17,21 @@ import org.springframework.web.server.ResponseStatusException;
 @CrossOrigin(origins = "http://localhost:5173")
 public class SimulationController {
 
-    private final SimulationRunService runService;
+    private final SimulationRunService simulationRunService;
 
-    public SimulationController(SimulationRunService runService) {
-        this.runService = runService;
+    public SimulationController(
+            SimulationRunService simulationRunService) {
+
+        this.simulationRunService = simulationRunService;
     }
 
-    
     @PostMapping("/{scenarioId}/run")
     @ResponseStatus(HttpStatus.ACCEPTED)
     public Map<String, Object> runSimulation(
             @PathVariable String scenarioId) {
 
-        Map<String, Object> run = runService.createRun(scenarioId);
+        Map<String, Object> run =
+                simulationRunService.createRun(scenarioId);
 
         if (run == null) {
             throw new ResponseStatusException(
@@ -47,14 +48,12 @@ public class SimulationController {
         );
     }
 
-
-    
-    
     @GetMapping("/{runId}/state")
     public Map<String, Object> getSimulationState(
             @PathVariable String runId) {
 
-        Map<String, Object> run = runService.getRun(runId);
+        Map<String, Object> run =
+                simulationRunService.getRun(runId);
 
         if (run == null) {
             throw new ResponseStatusException(
@@ -66,12 +65,12 @@ public class SimulationController {
         return run;
     }
 
-    
-    @PostMapping("/{runId}/step")
+    @PostMapping("/{runId}/advance")
     public Map<String, Object> advanceSimulation(
             @PathVariable String runId) {
 
-        Map<String, Object> run = runService.advanceRun(runId);
+        Map<String, Object> run =
+                simulationRunService.advanceRun(runId);
 
         if (run == null) {
             throw new ResponseStatusException(
@@ -82,6 +81,4 @@ public class SimulationController {
 
         return run;
     }
-
-
 }
