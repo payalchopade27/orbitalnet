@@ -5,6 +5,7 @@ import backend.model.SimulationRun;
 import backend.repository.EncounterRepository;
 import backend.repository.RiskAssessmentRepository;
 import backend.repository.SimulationRunRepository;
+import backend.repository.SpaceObjectRepository;
 import com.orbitalnet.core.EncounterDetectionService;
 import com.orbitalnet.core.EncounterTracker;
 import com.orbitalnet.core.InitialObjectState;
@@ -15,12 +16,15 @@ import com.orbitalnet.core.SpaceObject;
 import com.orbitalnet.core.Vector3D;
 
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 @Service
@@ -36,21 +40,25 @@ public class SimulationRunService {
     private final SimulationRunRepository simulationRunRepository;
     private final EncounterRepository encounterRepository;
     private final RiskAssessmentRepository riskAssessmentRepository;
+    private final SpaceObjectRepository spaceObjectRepository;
 
     private final OrbitalEngine orbitalEngine = new OrbitalEngine();
     private final EncounterDetectionService detectionService = new EncounterDetectionService();
     private final RiskEngine riskEngine = new RiskEngine();
 
+    @Autowired
     public SimulationRunService(
             ScenarioService scenarioService,
             SimulationRunRepository simulationRunRepository,
             EncounterRepository encounterRepository,
-            RiskAssessmentRepository riskAssessmentRepository) {
+            RiskAssessmentRepository riskAssessmentRepository,
+            SpaceObjectRepository spaceObjectRepository) {
 
         this.scenarioService = scenarioService;
         this.simulationRunRepository = simulationRunRepository;
         this.encounterRepository = encounterRepository;
         this.riskAssessmentRepository = riskAssessmentRepository;
+        this.spaceObjectRepository = spaceObjectRepository;
     }
 
     private static class ActiveSession {
@@ -60,6 +68,7 @@ public class SimulationRunService {
         final EncounterTracker tracker;
         final int durationSeconds;
         final Set<String> savedEncounterIds = ConcurrentHashMap.newKeySet();
+        final Map<String, Map<String, Object>> restoredEncounters = new ConcurrentHashMap<>();
 
         ActiveSession(
                 String runId,
@@ -88,6 +97,8 @@ public class SimulationRunService {
 
         com.orbitalnet.core.Scenario coreScenario =
                 createCoreScenario(scenario);
+
+        ensureSpaceObjectsPersisted(scenarioId, coreScenario);
 
         com.orbitalnet.core.SimulationRun coreRun =
                 new com.orbitalnet.core.SimulationRun(
@@ -156,47 +167,59 @@ public class SimulationRunService {
         String scenarioId = scenario.getScenarioId();
         long seed = (long) scenarioId.hashCode();
 
-        if (scenario.getSatellites() == 1 && scenario.getDebris() == 1) {
-            return orbitalEngine.generateKnownThreatScenario(scenarioId, seed);
+        // 1. Check for existing persisted space objects for this scenario; do not swallow exceptions
+        List<backend.model.SpaceObject> existingDbObjects;
+        if (spaceObjectRepository != null) {
+            try {
+                existingDbObjects = spaceObjectRepository.findByScenarioId(scenarioId);
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to check existing space objects for scenario: " + scenarioId, e);
+            }
+        } else {
+            existingDbObjects = List.of();
         }
 
-        ScenarioGenerationConfig config =
-                new ScenarioGenerationConfig(
-                        scenario.getSatellites(),
-                        scenario.getDebris(),
-                        -100.0,
-                        100.0,
-                        -1.0,
-                        1.0,
-                        0.001,
-                        0.05
-                );
+        // 2. Generate expected initial states from core engine
+        com.orbitalnet.core.Scenario generated;
+        ScenarioGenerationConfig config;
 
-        com.orbitalnet.core.Scenario generated =
-                orbitalEngine.generateScenario(scenarioId, config, seed);
+        if (scenario.getSatellites() == 1 && scenario.getDebris() == 1) {
+            generated = orbitalEngine.generateKnownThreatScenario(scenarioId, seed);
+            config = generated.getGenerationConfig();
+        } else {
+            config = new ScenarioGenerationConfig(
+                    scenario.getSatellites(),
+                    scenario.getDebris(),
+                    -100.0,
+                    100.0,
+                    -1.0,
+                    1.0,
+                    0.001,
+                    0.05
+            );
+            generated = orbitalEngine.generateScenario(scenarioId, config, seed);
+        }
 
-        if (scenario.getSatellites() >= 1 && scenario.getDebris() >= 1) {
+        List<InitialObjectState> expectedStates = new ArrayList<>(generated.getInitialObjectStates());
 
-            List<InitialObjectState> states =
-                    new ArrayList<>(generated.getInitialObjectStates());
-
+        // Apply head-on collision scenario override if scenario has at least 1 sat and 1 deb (and not known threat)
+        if (scenario.getSatellites() >= 1 && scenario.getDebris() >= 1
+                && !(scenario.getSatellites() == 1 && scenario.getDebris() == 1)) {
             int satIdx = -1;
             int debIdx = -1;
 
-            for (int i = 0; i < states.size(); i++) {
-                if (satIdx == -1
-                        && states.get(i).getType() == SpaceObject.ObjectType.SATELLITE) {
+            for (int i = 0; i < expectedStates.size(); i++) {
+                if (satIdx == -1 && expectedStates.get(i).getType() == SpaceObject.ObjectType.SATELLITE) {
                     satIdx = i;
                 }
-                if (debIdx == -1
-                        && states.get(i).getType() == SpaceObject.ObjectType.DEBRIS) {
+                if (debIdx == -1 && expectedStates.get(i).getType() == SpaceObject.ObjectType.DEBRIS) {
                     debIdx = i;
                 }
             }
 
             if (satIdx != -1) {
-                states.set(satIdx, new InitialObjectState(
-                        "SAT-1",
+                expectedStates.set(satIdx, new InitialObjectState(
+                        expectedStates.get(satIdx).getId(),
                         SpaceObject.ObjectType.SATELLITE,
                         new Vector3D(-100.0, 0.0, 0.0),
                         new Vector3D(1.0, 0.0, 0.0),
@@ -208,8 +231,8 @@ public class SimulationRunService {
             }
 
             if (debIdx != -1) {
-                states.set(debIdx, new InitialObjectState(
-                        "DEB-1",
+                expectedStates.set(debIdx, new InitialObjectState(
+                        expectedStates.get(debIdx).getId(),
                         SpaceObject.ObjectType.DEBRIS,
                         new Vector3D(100.0, 0.0, 0.0),
                         new Vector3D(-1.0, 0.0, 0.0),
@@ -219,17 +242,253 @@ public class SimulationRunService {
                         null
                 ));
             }
-
-            return new com.orbitalnet.core.Scenario(
-                    scenarioId,
-                    config,
-                    seed,
-                    states,
-                    com.orbitalnet.core.Scenario.Status.READY
-            );
         }
 
-        return generated;
+        // 3. Reconcile with existing DB objects or assign new full scenario-scoped IDs
+        List<InitialObjectState> mappedStates = new ArrayList<>(expectedStates.size());
+
+        if (existingDbObjects != null && !existingDbObjects.isEmpty()) {
+            // Validate that all existing DB records belong strictly to this scenario
+            for (backend.model.SpaceObject obj : existingDbObjects) {
+                if (!scenarioId.equals(obj.getScenarioId())) {
+                    throw new IllegalStateException(String.format(
+                            "Cross-scenario mismatch: space_object %s has scenario_id %s, expected %s",
+                            obj.getObjectId(), obj.getScenarioId(), scenarioId
+                    ));
+                }
+            }
+
+            // Validate total count matches expected
+            if (existingDbObjects.size() != expectedStates.size()) {
+                throw new IllegalStateException(String.format(
+                        "Existing space objects count mismatch for scenario %s: expected %d, found %d in database",
+                        scenarioId, expectedStates.size(), existingDbObjects.size()
+                ));
+            }
+
+            // Separate existing DB objects by type
+            List<backend.model.SpaceObject> existingSats = new ArrayList<>();
+            List<backend.model.SpaceObject> existingDebs = new ArrayList<>();
+            for (backend.model.SpaceObject obj : existingDbObjects) {
+                if ("SATELLITE".equalsIgnoreCase(obj.getObjectType())) {
+                    existingSats.add(obj);
+                } else if ("DEBRIS".equalsIgnoreCase(obj.getObjectType())) {
+                    existingDebs.add(obj);
+                } else {
+                    throw new IllegalStateException("Unknown space object type: " + obj.getObjectType());
+                }
+            }
+
+            if (existingSats.size() != scenario.getSatellites() || existingDebs.size() != scenario.getDebris()) {
+                throw new IllegalStateException(String.format(
+                        "Existing space objects type distribution mismatch for scenario %s: expected %d sats, %d debs, found %d sats, %d debs",
+                        scenarioId, scenario.getSatellites(), scenario.getDebris(), existingSats.size(), existingDebs.size()
+                ));
+            }
+
+            // Deterministic matching: match each expected object to a corresponding existing DB record
+            Set<String> matchedDbIds = new HashSet<>();
+
+            for (InitialObjectState expected : expectedStates) {
+                backend.model.SpaceObject matched = null;
+                List<backend.model.SpaceObject> candidates = expected.getType() == SpaceObject.ObjectType.SATELLITE
+                        ? existingSats
+                        : existingDebs;
+
+                // Priority 1: Match by name if non-null and matching, AND validate physics
+                if (expected.getName() != null && !expected.getName().isBlank()) {
+                    for (backend.model.SpaceObject candidate : candidates) {
+                        if (!matchedDbIds.contains(candidate.getObjectId())
+                                && expected.getName().equals(candidate.getName())) {
+                            boolean physicsMatch = Math.abs(candidate.getPosX() - expected.getPosition().getX()) < 0.05
+                                    && Math.abs(candidate.getPosY() - expected.getPosition().getY()) < 0.05
+                                    && Math.abs(candidate.getPosZ() - expected.getPosition().getZ()) < 0.05
+                                    && Math.abs(candidate.getVelX() - expected.getVelocity().getX()) < 0.05
+                                    && Math.abs(candidate.getVelY() - expected.getVelocity().getY()) < 0.05
+                                    && Math.abs(candidate.getVelZ() - expected.getVelocity().getZ()) < 0.05;
+                            if (physicsMatch) {
+                                matched = candidate;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                // Priority 2: Match by initial coordinates within tolerance
+                if (matched == null) {
+                    for (backend.model.SpaceObject candidate : candidates) {
+                        if (!matchedDbIds.contains(candidate.getObjectId())
+                                && Math.abs(candidate.getPosX() - expected.getPosition().getX()) < 0.05
+                                && Math.abs(candidate.getPosY() - expected.getPosition().getY()) < 0.05
+                                && Math.abs(candidate.getPosZ() - expected.getPosition().getZ()) < 0.05
+                                && Math.abs(candidate.getVelX() - expected.getVelocity().getX()) < 0.05
+                                && Math.abs(candidate.getVelY() - expected.getVelocity().getY()) < 0.05
+                                && Math.abs(candidate.getVelZ() - expected.getVelocity().getZ()) < 0.05) {
+                            matched = candidate;
+                            break;
+                        }
+                    }
+                }
+
+                if (matched == null) {
+                    throw new IllegalStateException(String.format(
+                            "Cannot safely reconcile existing space object for scenario %s (type=%s, name=%s, pos=%s). State mismatch detected.",
+                            scenarioId, expected.getType(), expected.getName(), expected.getPosition()
+                    ));
+                }
+
+                matchedDbIds.add(matched.getObjectId());
+
+                mappedStates.add(new InitialObjectState(
+                        matched.getObjectId(), // Retain exact existing ID
+                        expected.getType(),
+                        expected.getPosition(),
+                        expected.getVelocity(),
+                        expected.getSize(),
+                        expected.getStatus(),
+                        expected.getName(),
+                        expected.getOrbit()
+                ));
+            }
+
+        } else {
+            // New scenario: assign full scenario-scoped IDs: SAT-<scenarioId>-<N> and DEB-<scenarioId>-<N>
+            int satCount = 1;
+            int debCount = 1;
+
+            for (InitialObjectState expected : expectedStates) {
+                String generatedId;
+                if (expected.getType() == SpaceObject.ObjectType.SATELLITE) {
+                    generatedId = String.format("SAT-%s-%d", scenarioId, satCount++);
+                } else {
+                    generatedId = String.format("DEB-%s-%d", scenarioId, debCount++);
+                }
+
+                mappedStates.add(new InitialObjectState(
+                        generatedId,
+                        expected.getType(),
+                        expected.getPosition(),
+                        expected.getVelocity(),
+                        expected.getSize(),
+                        expected.getStatus(),
+                        expected.getName(),
+                        expected.getOrbit()
+                ));
+            }
+        }
+
+        return new com.orbitalnet.core.Scenario(
+                scenarioId,
+                config,
+                seed,
+                mappedStates,
+                com.orbitalnet.core.Scenario.Status.READY
+        );
+    }
+
+    private void ensureSpaceObjectsPersisted(
+            String scenarioId,
+            com.orbitalnet.core.Scenario coreScenario) {
+
+        if (scenarioId == null || coreScenario == null || spaceObjectRepository == null) {
+            return;
+        }
+
+        try {
+            List<backend.model.SpaceObject> existing =
+                    spaceObjectRepository.findByScenarioId(scenarioId);
+
+            Set<String> existingIds = new HashSet<>();
+            if (existing != null) {
+                for (backend.model.SpaceObject obj : existing) {
+                    if (scenarioId.equals(obj.getScenarioId())) {
+                        existingIds.add(obj.getObjectId());
+                    }
+                }
+            }
+
+            List<backend.model.SpaceObject> toSave = new ArrayList<>();
+
+            for (InitialObjectState state : coreScenario.getInitialObjectStates()) {
+                if (existingIds.contains(state.getId())) {
+                    continue;
+                }
+
+                Double altitudeKm = state.getOrbit() != null
+                        ? state.getOrbit().getAltitudeKm()
+                        : null;
+                Double inclinationDeg = state.getOrbit() != null
+                        ? state.getOrbit().getInclinationDeg()
+                        : null;
+                Double periodSeconds = state.getOrbit() != null
+                        ? state.getOrbit().getPeriodSeconds()
+                        : null;
+
+                backend.model.SpaceObject dbObj = new backend.model.SpaceObject(
+                        state.getId(),
+                        scenarioId,
+                        state.getType().name(),
+                        state.getName(),
+                        null,
+                        state.getSize(),
+                        state.getStatus().name(),
+                        state.getPosition().getX(),
+                        state.getPosition().getY(),
+                        state.getPosition().getZ(),
+                        state.getVelocity().getX(),
+                        state.getVelocity().getY(),
+                        state.getVelocity().getZ(),
+                        altitudeKm,
+                        inclinationDeg,
+                        periodSeconds
+                );
+
+                toSave.add(dbObj);
+            }
+
+            if (!toSave.isEmpty()) {
+                spaceObjectRepository.saveAll(toSave);
+            }
+
+            // Post-persistence verification: verify every expected object exists in DB for this scenario
+            List<backend.model.SpaceObject> verified =
+                    spaceObjectRepository.findByScenarioId(scenarioId);
+
+            int expectedCount = coreScenario.getInitialObjectStates().size();
+            int actualCount = verified != null ? verified.size() : 0;
+            if (actualCount != expectedCount) {
+                throw new IllegalStateException(String.format(
+                        "Persistence verification failed for scenario %s: expected %d space objects in database, but found %d. Possible cross-scenario ID collision or write failure.",
+                        scenarioId, expectedCount, actualCount
+                ));
+            }
+
+            Set<String> verifiedIds = new HashSet<>();
+            for (backend.model.SpaceObject obj : verified) {
+                if (!scenarioId.equals(obj.getScenarioId())) {
+                    throw new IllegalStateException(String.format(
+                            "Cross-scenario corruption detected: space_object %s belongs to scenario %s, expected %s.",
+                            obj.getObjectId(), obj.getScenarioId(), scenarioId
+                    ));
+                }
+                verifiedIds.add(obj.getObjectId());
+            }
+
+            for (InitialObjectState state : coreScenario.getInitialObjectStates()) {
+                if (!verifiedIds.contains(state.getId())) {
+                    throw new IllegalStateException(String.format(
+                            "Space object %s for scenario %s is missing from database after persistence.",
+                            state.getId(), scenarioId
+                    ));
+                }
+            }
+
+        } catch (Exception e) {
+            throw new RuntimeException(
+                    "Failed to persist space objects for scenario: " + scenarioId,
+                    e
+            );
+        }
     }
 
     private ActiveSession restoreSession(String runId) {
@@ -289,6 +548,37 @@ public class SimulationRunService {
 
             for (backend.model.Encounter enc : existingEncounters) {
                 session.savedEncounterIds.add(enc.getEncounterId());
+
+                int score = 0;
+                try {
+                    RiskAssessment risk =
+                            riskAssessmentRepository.findByEncounterId(enc.getEncounterId());
+                    if (risk != null) {
+                        score = risk.getTotalScore();
+                    }
+                } catch (Exception ignored) {
+                }
+
+                String encStatus = enc.getStatus() != null && !enc.getStatus().isBlank()
+                        ? enc.getStatus()
+                        : "DETECTED";
+
+                String objA = enc.getObjectAId() != null ? enc.getObjectAId() : "";
+                String objB = enc.getObjectBId() != null ? enc.getObjectBId() : "";
+
+                Map<String, Object> encMap = Map.of(
+                        "encounterId", enc.getEncounterId(),
+                        "objectAId", objA,
+                        "objectBId", objB,
+                        "minSeparationKm", enc.getMinSeparationKm(),
+                        "timeToClosestApproachSeconds", enc.getTimeToClosestApproachSeconds(),
+                        "relativeVelocityKmPerSec", enc.getRelativeVelocityKmPerSec(),
+                        "riskScore", score,
+                        "status", encStatus,
+                        "detectedAtTick", enc.getDetectedAtTick()
+                );
+
+                session.restoredEncounters.put(enc.getEncounterId(), encMap);
             }
 
             sessions.put(runId, session);
@@ -296,18 +586,15 @@ public class SimulationRunService {
             return session;
 
         } catch (Exception e) {
-            return null;
+
+            throw new RuntimeException(
+                    "Failed to restore simulation run",
+                    e
+            );
         }
     }
 
     public Map<String, Object> getRun(String runId) {
-
-        Map<String, Object> run =
-                runs.get(runId);
-
-        if (run != null) {
-            return run;
-        }
 
         ActiveSession session = sessions.get(runId);
 
@@ -323,11 +610,11 @@ public class SimulationRunService {
                 formatObjects(session.coreRun.getObjects());
 
         List<Map<String, Object>> encounters =
-                formatEncounters(session.tracker.getEncounters());
+                getMergedEncounters(session);
 
         Map<String, Object> restoredRun =
                 Map.of(
-                        "runId", session.runId,
+                        "runId", runId,
                         "scenarioId", session.scenarioId,
                         "status", session.coreRun.getStatus().name(),
                         "currentTick", session.coreRun.getCurrentTick(),
@@ -352,6 +639,8 @@ public class SimulationRunService {
         if (session == null) {
             return null;
         }
+
+        ensureSpaceObjectsPersisted(session.scenarioId, session.coreRun.getScenario());
 
         if (session.coreRun.getStatus()
                 == com.orbitalnet.core.SimulationRun.Status.COMPLETED) {
@@ -472,7 +761,7 @@ public class SimulationRunService {
                 formatObjects(session.coreRun.getObjects());
 
         List<Map<String, Object>> encounters =
-                formatEncounters(session.tracker.getEncounters());
+                getMergedEncounters(session);
 
         Map<String, Object> updatedRun =
                 Map.of(
@@ -525,28 +814,49 @@ public class SimulationRunService {
         return list;
     }
 
+    private List<Map<String, Object>> getMergedEncounters(ActiveSession session) {
+
+        Map<String, Map<String, Object>> merged = new LinkedHashMap<>();
+
+        merged.putAll(session.restoredEncounters);
+
+        List<Map<String, Object>> trackerEncounters =
+                formatEncounters(session.tracker.getEncounters());
+
+        for (Map<String, Object> encMap : trackerEncounters) {
+            String encounterId = (String) encMap.get("encounterId");
+            if (encounterId != null) {
+                merged.put(encounterId, encMap);
+            }
+        }
+
+        return new ArrayList<>(merged.values());
+    }
+
     private List<Map<String, Object>> formatEncounters(
             List<com.orbitalnet.core.Encounter> coreEncounters) {
 
         List<Map<String, Object>> list =
                 new ArrayList<>();
 
-        for (com.orbitalnet.core.Encounter enc : coreEncounters) {
+        for (com.orbitalnet.core.Encounter encounter : coreEncounters) {
 
-            int score = enc.getRiskScore() != null
-                    ? enc.getRiskScore().getTotalScore()
-                    : 0;
+            int riskScore = 0;
+
+            if (encounter.getRiskScore() != null) {
+                riskScore = encounter.getRiskScore().getTotalScore();
+            }
 
             Map<String, Object> map = Map.of(
-                    "encounterId", enc.getEncounterId(),
-                    "objectAId", enc.getObjectAId(),
-                    "objectBId", enc.getObjectBId(),
-                    "minSeparationKm", enc.getMinSeparationKm(),
-                    "timeToClosestApproachSeconds", enc.getTimeToClosestApproachSeconds(),
-                    "relativeVelocityKmPerSec", enc.getRelativeVelocityKmPerSec(),
-                    "riskScore", score,
-                    "status", enc.getStatus().name(),
-                    "detectedAtTick", (long) enc.getDetectedAtTick()
+                    "encounterId", encounter.getEncounterId(),
+                    "objectAId", encounter.getObjectAId(),
+                    "objectBId", encounter.getObjectBId(),
+                    "minSeparationKm", encounter.getMinSeparationKm(),
+                    "timeToClosestApproachSeconds", encounter.getTimeToClosestApproachSeconds(),
+                    "relativeVelocityKmPerSec", encounter.getRelativeVelocityKmPerSec(),
+                    "riskScore", riskScore,
+                    "status", encounter.getStatus().name(),
+                    "detectedAtTick", encounter.getDetectedAtTick()
             );
 
             list.add(map);

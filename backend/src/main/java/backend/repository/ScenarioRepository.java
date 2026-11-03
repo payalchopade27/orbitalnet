@@ -15,9 +15,9 @@ import org.springframework.stereotype.Repository;
 public class ScenarioRepository {
 
     private final String url =
-            "jdbc:postgresql://db.fahdnplqhmxhixizdyxy.supabase.co:5432/postgres";
+            "jdbc:postgresql://aws-0-ap-south-1.pooler.supabase.com:5432/postgres?sslmode=require";
 
-    private final String username = "postgres";
+    private final String username = "postgres.fahdnplqhmxhixizdyxy";
 
     private final String password =
             System.getenv("SUPABASE_DB_PASSWORD");

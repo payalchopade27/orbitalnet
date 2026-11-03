@@ -1,10 +1,11 @@
-<<<<<<< HEAD
 # Maven build output
 **/target/
 
 # Java Virtual Machine crash and replay logs
 hs_err_pid*.log
 replay_pid*.log
-=======
-backend/target/
->>>>>>> origin/member3-data-se
+
+# Environment variables
+.env
+.env.*
+!.env.example

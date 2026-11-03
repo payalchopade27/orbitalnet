@@ -12,6 +12,7 @@ import com.orbitalnet.core.Satellite;
 import com.orbitalnet.core.SpaceObject;
 import com.orbitalnet.core.Vector3D;
 
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -28,13 +29,14 @@ public class EncounterController {
     private final SimulationRunService simulationRunService;
 
     private final String url =
-            "jdbc:postgresql://db.fahdnplqhmxhixizdyxy.supabase.co:5432/postgres";
+            "jdbc:postgresql://aws-0-ap-south-1.pooler.supabase.com:5432/postgres?sslmode=require";
 
-    private final String username = "postgres";
+    private final String username = "postgres.fahdnplqhmxhixizdyxy";
 
     private final String password =
             System.getenv("SUPABASE_DB_PASSWORD");
 
+    @Autowired
     public EncounterController(
             EncounterRepository encounterRepository,
             RiskAssessmentRepository riskAssessmentRepository,

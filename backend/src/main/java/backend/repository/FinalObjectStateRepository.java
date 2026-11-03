@@ -1,6 +1,7 @@
 package backend.repository;
 
 import backend.model.FinalObjectState;
+import org.springframework.stereotype.Repository;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -9,12 +10,13 @@ import java.sql.PreparedStatement;
 import java.util.ArrayList;
 import java.util.List;
 
+@Repository
 public class FinalObjectStateRepository {
 
     private final String url =
-            "jdbc:postgresql://db.fahdnplqhmxhixizdyxy.supabase.co:5432/postgres";
+            "jdbc:postgresql://aws-0-ap-south-1.pooler.supabase.com:5432/postgres?sslmode=require";
 
-    private final String username = "postgres";
+    private final String username = "postgres.fahdnplqhmxhixizdyxy";
 
     private final String password =
             System.getenv("SUPABASE_DB_PASSWORD");
