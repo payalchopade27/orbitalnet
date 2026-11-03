@@ -1,9 +1,16 @@
 package backend;
 
-import org.springframework.http.HttpStatus;
-import org.springframework.web.bind.annotation.*;
-
 import java.util.Map;
+
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.CrossOrigin;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.ResponseStatus;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 @RequestMapping("/api/simulations")
@@ -27,19 +34,17 @@ public class SimulationController {
                 simulationRunService.createRun(scenarioId);
 
         if (run == null) {
-
-            return Map.of(
-                    "status", "FAILED",
-                    "message", "Scenario not found",
-                    "scenarioId", scenarioId
+            throw new ResponseStatusException(
+                    HttpStatus.NOT_FOUND,
+                    "Scenario not found. Generate a scenario first."
             );
         }
 
         return Map.of(
-                "status", "PENDING",
                 "message", "Simulation request accepted",
+                "scenarioId", run.get("scenarioId"),
                 "runId", run.get("runId"),
-                "scenarioId", scenarioId
+                "status", run.get("status")
         );
     }
 
@@ -51,18 +56,16 @@ public class SimulationController {
                 simulationRunService.getRun(runId);
 
         if (run == null) {
-
-            return Map.of(
-                    "status", "NOT_FOUND",
-                    "message", "Simulation run not found",
-                    "runId", runId
+            throw new ResponseStatusException(
+                    HttpStatus.NOT_FOUND,
+                    "Simulation run not found"
             );
         }
 
         return run;
     }
 
-    @PostMapping("/{runId}/advance")
+    @PostMapping({"/{runId}/advance", "/{runId}/step"})
     public Map<String, Object> advanceSimulation(
             @PathVariable String runId) {
 
@@ -70,11 +73,9 @@ public class SimulationController {
                 simulationRunService.advanceRun(runId);
 
         if (run == null) {
-
-            return Map.of(
-                    "status", "NOT_FOUND",
-                    "message", "Simulation run not found",
-                    "runId", runId
+            throw new ResponseStatusException(
+                    HttpStatus.NOT_FOUND,
+                    "Simulation run not found"
             );
         }
 

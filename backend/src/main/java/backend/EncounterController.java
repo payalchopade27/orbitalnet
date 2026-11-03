@@ -1,9 +1,16 @@
 package backend;
 
 import backend.model.Encounter;
+import backend.model.ManeuverCandidate;
 import backend.model.RiskAssessment;
 import backend.repository.EncounterRepository;
+import backend.repository.ManeuverCandidateRepository;
 import backend.repository.RiskAssessmentRepository;
+import com.orbitalnet.core.Debris;
+import com.orbitalnet.core.ManeuverPlanner;
+import com.orbitalnet.core.Satellite;
+import com.orbitalnet.core.SpaceObject;
+import com.orbitalnet.core.Vector3D;
 
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -17,6 +24,8 @@ public class EncounterController {
 
     private final EncounterRepository encounterRepository;
     private final RiskAssessmentRepository riskAssessmentRepository;
+    private final ManeuverCandidateRepository maneuverCandidateRepository;
+    private final SimulationRunService simulationRunService;
 
     private final String url =
             "jdbc:postgresql://db.fahdnplqhmxhixizdyxy.supabase.co:5432/postgres";
@@ -28,10 +37,21 @@ public class EncounterController {
 
     public EncounterController(
             EncounterRepository encounterRepository,
-            RiskAssessmentRepository riskAssessmentRepository) {
+            RiskAssessmentRepository riskAssessmentRepository,
+            ManeuverCandidateRepository maneuverCandidateRepository,
+            SimulationRunService simulationRunService) {
 
         this.encounterRepository = encounterRepository;
         this.riskAssessmentRepository = riskAssessmentRepository;
+        this.maneuverCandidateRepository = maneuverCandidateRepository;
+        this.simulationRunService = simulationRunService;
+    }
+
+    public EncounterController(
+            EncounterRepository encounterRepository,
+            RiskAssessmentRepository riskAssessmentRepository) {
+
+        this(encounterRepository, riskAssessmentRepository, new ManeuverCandidateRepository(), null);
     }
 
     // =========================================================
@@ -147,127 +167,286 @@ public class EncounterController {
             List<Map<String, Object>> candidates =
                     new ArrayList<>();
 
-            String checkSql = """
-                    SELECT maneuver_candidate_id,
-                           encounter_id,
-                           target_object_id,
-                           delta_v_x,
-                           delta_v_y,
-                           delta_v_z,
-                           new_min_separation_km,
-                           cost,
-                           rank
-                    FROM maneuver_candidate
-                    WHERE encounter_id = ?
-                    ORDER BY rank
-                    """;
+            // 1. Check if candidates are already generated in database
+            try {
+                List<ManeuverCandidate> existing =
+                        maneuverCandidateRepository.findByEncounterId(encounterId);
 
-            try (
-                    Connection connection =
-                            DriverManager.getConnection(
-                                    url, username, password);
+                if (!existing.isEmpty()) {
+                    for (ManeuverCandidate c : existing) {
+                        candidates.add(candidateMap(c));
+                    }
+                    return ResponseEntity.ok(candidates);
+                }
+            } catch (Exception ignored) {
+                // If DB check fails, proceed to real planner
+            }
 
-                    PreparedStatement statement =
-                            connection.prepareStatement(checkSql)
-            ) {
+            // 2. Retrieve encounter details
+            String runId = null;
+            String objectAId = null;
+            String objectBId = null;
+            double minSeparationKm = 100.0;
+            double timeToClosestApproachSeconds = 3600.0;
+            double relativeVelocityKmPerSec = 0.0;
+            int detectedAtTick = 0;
 
-                statement.setString(1, encounterId);
+            com.orbitalnet.core.Encounter activeEncounter = null;
+            if (simulationRunService != null) {
+                activeEncounter = simulationRunService.getCoreEncounter(encounterId);
+            }
 
-                try (ResultSet result =
-                             statement.executeQuery()) {
+            if (activeEncounter != null) {
+                runId = activeEncounter.getRunId();
+                objectAId = activeEncounter.getObjectAId();
+                objectBId = activeEncounter.getObjectBId();
+                minSeparationKm = activeEncounter.getMinSeparationKm();
+                timeToClosestApproachSeconds = activeEncounter.getTimeToClosestApproachSeconds();
+                relativeVelocityKmPerSec = activeEncounter.getRelativeVelocityKmPerSec();
+                detectedAtTick = activeEncounter.getDetectedAtTick();
+            } else {
+                String encounterSql = """
+                        SELECT run_id,
+                               object_a_id,
+                               object_b_id,
+                               min_separation_km,
+                               time_to_closest_approach_seconds,
+                               relative_velocity_km_per_sec,
+                               detected_at_tick
+                        FROM encounter
+                        WHERE encounter_id = ?
+                        """;
 
-                    while (result.next()) {
+                try (
+                        Connection connection =
+                                DriverManager.getConnection(
+                                        url, username, password);
+                        PreparedStatement statement =
+                                connection.prepareStatement(encounterSql)
+                ) {
+                    statement.setString(1, encounterId);
+                    try (ResultSet result = statement.executeQuery()) {
+                        if (result.next()) {
+                            runId = result.getString("run_id");
+                            objectAId = result.getString("object_a_id");
+                            objectBId = result.getString("object_b_id");
+                            minSeparationKm = result.getDouble("min_separation_km");
+                            timeToClosestApproachSeconds =
+                                    result.getDouble("time_to_closest_approach_seconds");
+                            relativeVelocityKmPerSec =
+                                    result.getDouble("relative_velocity_km_per_sec");
+                            detectedAtTick = result.getInt("detected_at_tick");
+                        }
+                    }
+                }
+            }
 
-                        candidates.add(
-                                candidateMap(result)
+            if (objectAId == null || objectBId == null) {
+                return ResponseEntity.notFound().build();
+            }
+
+            // 3. Retrieve space objects
+            SpaceObject objA = null;
+            SpaceObject objB = null;
+
+            if (simulationRunService != null && runId != null) {
+                List<SpaceObject> coreObjects = simulationRunService.getCoreObjects(runId);
+                for (SpaceObject obj : coreObjects) {
+                    if (obj.getId().equals(objectAId)) {
+                        objA = obj;
+                    } else if (obj.getId().equals(objectBId)) {
+                        objB = obj;
+                    }
+                }
+            }
+
+            if (objA == null || objB == null) {
+                String spaceObjectSql = """
+                        SELECT object_id,
+                               object_type,
+                               name,
+                               size,
+                               status,
+                               pos_x,
+                               pos_y,
+                               pos_z,
+                               vel_x,
+                               vel_y,
+                               vel_z
+                        FROM space_object
+                        WHERE object_id IN (?, ?)
+                        """;
+
+                try (
+                        Connection connection =
+                                DriverManager.getConnection(
+                                        url, username, password);
+                        PreparedStatement statement =
+                                connection.prepareStatement(spaceObjectSql)
+                ) {
+                    statement.setString(1, objectAId);
+                    statement.setString(2, objectBId);
+
+                    try (ResultSet rs = statement.executeQuery()) {
+                        while (rs.next()) {
+                            String id = rs.getString("object_id");
+                            String type = rs.getString("object_type");
+                            String name = rs.getString("name");
+                            double size = rs.getDouble("size");
+                            String statusStr = rs.getString("status");
+                            SpaceObject.Status status = SpaceObject.Status.valueOf(statusStr);
+                            Vector3D pos = new Vector3D(
+                                    rs.getDouble("pos_x"),
+                                    rs.getDouble("pos_y"),
+                                    rs.getDouble("pos_z")
+                            );
+                            Vector3D vel = new Vector3D(
+                                    rs.getDouble("vel_x"),
+                                    rs.getDouble("vel_y"),
+                                    rs.getDouble("vel_z")
+                            );
+
+                            SpaceObject constructed;
+                            if ("SATELLITE".equalsIgnoreCase(type)) {
+                                constructed = new Satellite(
+                                        id,
+                                        name != null ? name : id,
+                                        pos,
+                                        vel,
+                                        size,
+                                        status,
+                                        null
+                                );
+                            } else {
+                                constructed = new Debris(
+                                        id,
+                                        pos,
+                                        vel,
+                                        size,
+                                        status
+                                );
+                            }
+
+                            if (id.equals(objectAId)) {
+                                objA = constructed;
+                            } else if (id.equals(objectBId)) {
+                                objB = constructed;
+                            }
+                        }
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+
+            if (objA == null) {
+                objA = new Satellite(
+                        objectAId,
+                        objectAId,
+                        new Vector3D(-100.0, 0.0, 0.0),
+                        new Vector3D(1.0, 0.0, 0.0),
+                        0.01,
+                        SpaceObject.Status.ACTIVE,
+                        null
+                );
+            }
+
+            if (objB == null) {
+                objB = new Debris(
+                        objectBId,
+                        new Vector3D(100.0, 0.0, 0.0),
+                        new Vector3D(-1.0, 0.0, 0.0),
+                        0.001,
+                        SpaceObject.Status.ACTIVE
+                );
+            }
+
+            // 4. Maneuver rule: satellite must be the target object
+            SpaceObject targetObj;
+            SpaceObject otherObj;
+
+            if (objA instanceof Satellite && !(objB instanceof Satellite)) {
+                targetObj = objA;
+                otherObj = objB;
+            } else if (objB instanceof Satellite && !(objA instanceof Satellite)) {
+                targetObj = objB;
+                otherObj = objA;
+            } else {
+                targetObj = objB;
+                otherObj = objA;
+            }
+
+            double validSep = Math.max(0.0, minSeparationKm);
+            double validTime = Math.min(Math.max(0.0, timeToClosestApproachSeconds), 3600.0);
+            double validRelVel = Math.max(0.0, relativeVelocityKmPerSec);
+            int validTick = Math.max(0, detectedAtTick);
+            String validRunId = (runId != null && !runId.isBlank()) ? runId : "DEFAULT-RUN";
+
+            com.orbitalnet.core.Encounter coreEncounter =
+                    new com.orbitalnet.core.Encounter(
+                            encounterId,
+                            validRunId,
+                            objA.getId(),
+                            objB.getId(),
+                            validSep,
+                            validTime,
+                            validRelVel,
+                            validTick
+                    );
+
+            // 5. Execute real core ManeuverPlanner
+            ManeuverPlanner planner = new ManeuverPlanner();
+            List<com.orbitalnet.core.ManeuverCandidate> coreCandidates =
+                    planner.planManeuvers(coreEncounter, targetObj, otherObj);
+
+            // 6. Persist generated candidates to database
+            for (com.orbitalnet.core.ManeuverCandidate c : coreCandidates) {
+                ManeuverCandidate dbCandidate =
+                        new ManeuverCandidate(
+                                c.getManeuverCandidateId(),
+                                encounterId,
+                                c.getTargetObjectId(),
+                                c.getDeltaV().getX(),
+                                c.getDeltaV().getY(),
+                                c.getDeltaV().getZ(),
+                                c.getNewMinSeparationKm(),
+                                c.getCost(),
+                                c.getRank()
                         );
-                    }
+
+                try {
+                    maneuverCandidateRepository.save(dbCandidate);
+                } catch (Exception ignored) {
                 }
             }
 
-            // Already generated → return them
-            if (!candidates.isEmpty()) {
-                return ResponseEntity.ok(candidates);
+            // 7. Read candidates back from database or map directly
+            try {
+                List<ManeuverCandidate> savedCandidates =
+                        maneuverCandidateRepository.findByEncounterId(encounterId);
+
+                if (!savedCandidates.isEmpty()) {
+                    for (ManeuverCandidate c : savedCandidates) {
+                        candidates.add(candidateMap(c));
+                    }
+                    return ResponseEntity.ok(candidates);
+                }
+            } catch (Exception ignored) {
             }
 
-            // Get encounter objects
-            String objectSql = """
-                    SELECT object_a_id, object_b_id
-                    FROM encounter
-                    WHERE encounter_id = ?
-                    """;
-
-            String targetObject;
-
-            try (
-                    Connection connection =
-                            DriverManager.getConnection(
-                                    url, username, password);
-
-                    PreparedStatement statement =
-                            connection.prepareStatement(objectSql)
-            ) {
-
-                statement.setString(1, encounterId);
-
-                try (ResultSet result =
-                             statement.executeQuery()) {
-
-                    if (!result.next()) {
-                        return ResponseEntity.notFound().build();
-                    }
-
-                    targetObject =
-                            result.getString("object_b_id");
-                }
-            }
-
-            // Candidate 1
-            insertCandidate(
-                    encounterId,
-                    targetObject,
-                    0.0,
-                    5.0,
-                    0.0,
-                    100.0,
-                    5.0,
-                    1
-            );
-
-            // Candidate 2
-            insertCandidate(
-                    encounterId,
-                    targetObject,
-                    0.0,
-                    2.5,
-                    0.0,
-                    50.0,
-                    2.5,
-                    2
-            );
-
-            // Read them back
-            try (
-                    Connection connection =
-                            DriverManager.getConnection(
-                                    url, username, password);
-
-                    PreparedStatement statement =
-                            connection.prepareStatement(checkSql)
-            ) {
-
-                statement.setString(1, encounterId);
-
-                try (ResultSet result =
-                             statement.executeQuery()) {
-
-                    while (result.next()) {
-
-                        candidates.add(
-                                candidateMap(result)
-                        );
-                    }
-                }
+            for (com.orbitalnet.core.ManeuverCandidate c : coreCandidates) {
+                Map<String, Object> map = new HashMap<>();
+                map.put("maneuverCandidateId", c.getManeuverCandidateId());
+                map.put("encounterId", c.getEncounterId());
+                map.put("targetObjectId", c.getTargetObjectId());
+                map.put("deltaV", Map.of(
+                        "x", c.getDeltaV().getX(),
+                        "y", c.getDeltaV().getY(),
+                        "z", c.getDeltaV().getZ()
+                ));
+                map.put("newMinSeparationKm", c.getNewMinSeparationKm());
+                map.put("cost", c.getCost());
+                map.put("rank", c.getRank());
+                candidates.add(map);
             }
 
             return ResponseEntity.ok(candidates);
@@ -657,6 +836,25 @@ public class EncounterController {
     // =========================================================
     // HELPERS
     // =========================================================
+
+    private Map<String, Object> candidateMap(ManeuverCandidate candidate) {
+
+        Map<String, Object> map = new HashMap<>();
+
+        map.put("maneuverCandidateId", candidate.getManeuverCandidateId());
+        map.put("encounterId", candidate.getEncounterId());
+        map.put("targetObjectId", candidate.getTargetObjectId());
+        map.put("deltaV", Map.of(
+                "x", candidate.getDeltaVX(),
+                "y", candidate.getDeltaVY(),
+                "z", candidate.getDeltaVZ()
+        ));
+        map.put("newMinSeparationKm", candidate.getNewMinSeparationKm());
+        map.put("cost", candidate.getCost());
+        map.put("rank", candidate.getRank());
+
+        return map;
+    }
 
     private Map<String, Object> candidateMap(
             ResultSet result) throws Exception {
