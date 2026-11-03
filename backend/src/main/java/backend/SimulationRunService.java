@@ -1,16 +1,23 @@
 package backend;
 
-import backend.model.Encounter;
 import backend.model.RiskAssessment;
 import backend.model.SimulationRun;
 import backend.repository.EncounterRepository;
 import backend.repository.RiskAssessmentRepository;
 import backend.repository.SimulationRunRepository;
+import com.orbitalnet.core.EncounterDetectionService;
+import com.orbitalnet.core.EncounterTracker;
+import com.orbitalnet.core.InitialObjectState;
+import com.orbitalnet.core.OrbitalEngine;
+import com.orbitalnet.core.RiskEngine;
+import com.orbitalnet.core.ScenarioGenerationConfig;
+import com.orbitalnet.core.SpaceObject;
+import com.orbitalnet.core.Vector3D;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Random;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -22,10 +29,17 @@ public class SimulationRunService {
     private final Map<String, Map<String, Object>> runs =
             new ConcurrentHashMap<>();
 
+    private final Map<String, ActiveSession> sessions =
+            new ConcurrentHashMap<>();
+
     private final ScenarioService scenarioService;
     private final SimulationRunRepository simulationRunRepository;
     private final EncounterRepository encounterRepository;
     private final RiskAssessmentRepository riskAssessmentRepository;
+
+    private final OrbitalEngine orbitalEngine = new OrbitalEngine();
+    private final EncounterDetectionService detectionService = new EncounterDetectionService();
+    private final RiskEngine riskEngine = new RiskEngine();
 
     public SimulationRunService(
             ScenarioService scenarioService,
@@ -39,6 +53,28 @@ public class SimulationRunService {
         this.riskAssessmentRepository = riskAssessmentRepository;
     }
 
+    private static class ActiveSession {
+        final String runId;
+        final String scenarioId;
+        final com.orbitalnet.core.SimulationRun coreRun;
+        final EncounterTracker tracker;
+        final int durationSeconds;
+        final Set<String> savedEncounterIds = ConcurrentHashMap.newKeySet();
+
+        ActiveSession(
+                String runId,
+                String scenarioId,
+                com.orbitalnet.core.SimulationRun coreRun,
+                EncounterTracker tracker,
+                int durationSeconds) {
+            this.runId = runId;
+            this.scenarioId = scenarioId;
+            this.coreRun = coreRun;
+            this.tracker = tracker;
+            this.durationSeconds = durationSeconds;
+        }
+    }
+
     public Map<String, Object> createRun(String scenarioId) {
 
         ScenarioResponse scenario =
@@ -50,8 +86,31 @@ public class SimulationRunService {
 
         String runId = UUID.randomUUID().toString();
 
+        com.orbitalnet.core.Scenario coreScenario =
+                createCoreScenario(scenario);
+
+        com.orbitalnet.core.SimulationRun coreRun =
+                new com.orbitalnet.core.SimulationRun(
+                        runId,
+                        coreScenario,
+                        null,
+                        null
+                );
+
+        EncounterTracker tracker = new EncounterTracker(runId);
+
+        ActiveSession session = new ActiveSession(
+                runId,
+                scenarioId,
+                coreRun,
+                tracker,
+                scenario.getDuration() * 60
+        );
+
+        sessions.put(runId, session);
+
         List<Map<String, Object>> objects =
-                generateObjects(scenario);
+                formatObjects(coreRun.getObjects());
 
         Map<String, Object> run = Map.of(
                 "runId", runId,
@@ -91,122 +150,89 @@ public class SimulationRunService {
         return run;
     }
 
-    private List<Map<String, Object>> generateObjects(
+    private com.orbitalnet.core.Scenario createCoreScenario(
             ScenarioResponse scenario) {
 
-        List<Map<String, Object>> objects =
-                new ArrayList<>();
+        String scenarioId = scenario.getScenarioId();
+        long seed = (long) scenarioId.hashCode();
 
-        Random random =
-                new Random(
-                        scenario.getScenarioId().hashCode()
+        if (scenario.getSatellites() == 1 && scenario.getDebris() == 1) {
+            return orbitalEngine.generateKnownThreatScenario(scenarioId, seed);
+        }
+
+        ScenarioGenerationConfig config =
+                new ScenarioGenerationConfig(
+                        scenario.getSatellites(),
+                        scenario.getDebris(),
+                        -100.0,
+                        100.0,
+                        -1.0,
+                        1.0,
+                        0.001,
+                        0.05
                 );
 
-        for (int i = 1;
-             i <= scenario.getSatellites();
-             i++) {
+        com.orbitalnet.core.Scenario generated =
+                orbitalEngine.generateScenario(scenarioId, config, seed);
 
-            objects.add(
-                    createObject(
-                   String.format("SAT-%03d", i),
-                  "SATELLITE",
-                   0.01,
-                    random
-                )
+        if (scenario.getSatellites() >= 1 && scenario.getDebris() >= 1) {
+
+            List<InitialObjectState> states =
+                    new ArrayList<>(generated.getInitialObjectStates());
+
+            int satIdx = -1;
+            int debIdx = -1;
+
+            for (int i = 0; i < states.size(); i++) {
+                if (satIdx == -1
+                        && states.get(i).getType() == SpaceObject.ObjectType.SATELLITE) {
+                    satIdx = i;
+                }
+                if (debIdx == -1
+                        && states.get(i).getType() == SpaceObject.ObjectType.DEBRIS) {
+                    debIdx = i;
+                }
+            }
+
+            if (satIdx != -1) {
+                states.set(satIdx, new InitialObjectState(
+                        "SAT-1",
+                        SpaceObject.ObjectType.SATELLITE,
+                        new Vector3D(-100.0, 0.0, 0.0),
+                        new Vector3D(1.0, 0.0, 0.0),
+                        0.01,
+                        SpaceObject.Status.ACTIVE,
+                        "Satellite-1",
+                        null
+                ));
+            }
+
+            if (debIdx != -1) {
+                states.set(debIdx, new InitialObjectState(
+                        "DEB-1",
+                        SpaceObject.ObjectType.DEBRIS,
+                        new Vector3D(100.0, 0.0, 0.0),
+                        new Vector3D(-1.0, 0.0, 0.0),
+                        0.001,
+                        SpaceObject.Status.ACTIVE,
+                        null,
+                        null
+                ));
+            }
+
+            return new com.orbitalnet.core.Scenario(
+                    scenarioId,
+                    config,
+                    seed,
+                    states,
+                    com.orbitalnet.core.Scenario.Status.READY
             );
         }
 
-        for (int i = 1;
-             i <= scenario.getDebris();
-             i++) {
-
-            objects.add(
-                    createObject(
-                    String.format("DEB-%03d", i),
-                    "DEBRIS",
-                    0.001,
-                    random
-)
-            );
-        }
-
-        return objects;
+        return generated;
     }
 
-    private Map<String, Object> createObject(
-        String id,
-        String type,
-        double size,
-        Random random) {
-
-    double x;
-    double y;
-    double z;
-
-    double vx;
-    double vy;
-    double vz;
-
-    if ("SAT-001".equals(id)) {
-
-        x = 0.0;
-        y = 0.0;
-        z = 0.0;
-
-        vx = 1.0;
-        vy = 0.0;
-        vz = 0.0;
-
-    } else if ("DEB-001".equals(id)) {
-
-        x = 50.0;
-        y = 0.0;
-        z = 0.0;
-
-        vx = -1.0;
-        vy = 0.0;
-        vz = 0.0;
-
-    } else {
-
-        x = random.nextDouble() * 20000 - 10000;
-        y = random.nextDouble() * 20000 - 10000;
-        z = random.nextDouble() * 20000 - 10000;
-
-        vx = random.nextDouble() * 15 - 7.5;
-        vy = random.nextDouble() * 15 - 7.5;
-        vz = random.nextDouble() * 15 - 7.5;
-    }
-
-    Map<String, Double> position = Map.of(
-            "x", x,
-            "y", y,
-            "z", z
-    );
-
-    Map<String, Double> velocity = Map.of(
-            "x", vx,
-            "y", vy,
-            "z", vz
-    );
-
-    return Map.of(
-            "id", id,
-            "type", type,
-            "status", "ACTIVE",
-            "size", size,
-            "position", position,
-            "velocity", velocity
-    );
-}
-    public Map<String, Object> getRun(String runId) {
-
-        Map<String, Object> run =
-                runs.get(runId);
-
-        if (run != null) {
-            return run;
-        }
+    private ActiveSession restoreSession(String runId) {
 
         try {
 
@@ -222,140 +248,208 @@ public class SimulationRunService {
                             dbRun.getScenarioId()
                     );
 
-            List<Map<String, Object>> objects =
-                    scenario == null
-                            ? new ArrayList<>()
-                            : generateObjects(scenario);
+            if (scenario == null) {
+                return null;
+            }
 
-            Map<String, Object> restoredRun =
-                    Map.of(
-                            "runId", dbRun.getRunId(),
-                            "scenarioId", dbRun.getScenarioId(),
-                            "status", dbRun.getStatus(),
-                            "currentTick",
-                                    dbRun.getCurrentTick(),
-                            "elapsedTimeSeconds",
-                                    dbRun.getElapsedTimeSeconds(),
-                            "objects", objects,
-                            "encounters",
-                                    List.of()
+            com.orbitalnet.core.Scenario coreScenario =
+                    createCoreScenario(scenario);
+
+            com.orbitalnet.core.SimulationRun coreRun =
+                    new com.orbitalnet.core.SimulationRun(
+                            runId,
+                            coreScenario,
+                            null,
+                            null
                     );
 
-            runs.put(runId, restoredRun);
+            if (!"PENDING".equals(dbRun.getStatus())) {
+                coreRun.start();
 
-            return restoredRun;
+                for (int i = 0; i < dbRun.getCurrentTick(); i++) {
+                    if (coreRun.getStatus()
+                            == com.orbitalnet.core.SimulationRun.Status.RUNNING) {
+                        coreRun.advanceTick();
+                    }
+                }
+            }
+
+            EncounterTracker tracker = new EncounterTracker(runId);
+
+            ActiveSession session = new ActiveSession(
+                    runId,
+                    dbRun.getScenarioId(),
+                    coreRun,
+                    tracker,
+                    scenario.getDuration() * 60
+            );
+
+            List<backend.model.Encounter> existingEncounters =
+                    encounterRepository.findByRunId(runId);
+
+            for (backend.model.Encounter enc : existingEncounters) {
+                session.savedEncounterIds.add(enc.getEncounterId());
+            }
+
+            sessions.put(runId, session);
+
+            return session;
 
         } catch (Exception e) {
-
-            throw new RuntimeException(
-                    "Failed to get simulation run",
-                    e
-            );
+            return null;
         }
     }
 
-    public Map<String, Object> advanceRun(String runId) {
+    public Map<String, Object> getRun(String runId) {
 
         Map<String, Object> run =
                 runs.get(runId);
 
-        if (run == null) {
-            run = getRun(runId);
-        }
-
-        if (run == null) {
-            return null;
-        }
-
-        if ("COMPLETED".equals(run.get("status"))) {
+        if (run != null) {
             return run;
         }
 
-        List<Map<String, Object>> updatedObjects =
-                new ArrayList<>();
+        ActiveSession session = sessions.get(runId);
 
-        List<Map<String, Object>> objects =
-                (List<Map<String, Object>>) run.get("objects");
-
-        for (Map<String, Object> object : objects) {
-
-            Map<String, Double> oldPosition =
-                    (Map<String, Double>)
-                            object.get("position");
-
-            Map<String, Double> velocity =
-                    (Map<String, Double>)
-                            object.get("velocity");
-
-            Map<String, Double> newPosition =
-                    Map.of(
-                            "x",
-                            oldPosition.get("x")
-                                    + velocity.get("x") * 5.0,
-
-                            "y",
-                            oldPosition.get("y")
-                                    + velocity.get("y") * 5.0,
-
-                            "z",
-                            oldPosition.get("z")
-                                    + velocity.get("z") * 5.0
-                    );
-
-            Map<String, Object> updatedObject =
-                    Map.of(
-                            "id", object.get("id"),
-                            "type", object.get("type"),
-                            "status", object.get("status"),
-                            "size", object.get("size"),
-                            "position", newPosition,
-                            "velocity", velocity
-                    );
-
-            updatedObjects.add(updatedObject);
+        if (session == null) {
+            session = restoreSession(runId);
         }
 
-        int currentTick =
-                ((Number) run.get("currentTick"))
-                        .intValue() + 1;
+        if (session == null) {
+            return null;
+        }
 
-        double elapsedTime =
-                currentTick * 5.0;
-
-        ScenarioResponse scenario =
-                scenarioService.getScenario(
-                        (String) run.get("scenarioId")
-                );
-
-        int durationSeconds =
-                scenario.getDuration() * 60;
-
-        String status =
-                elapsedTime >= durationSeconds
-                        ? "COMPLETED"
-                        : "RUNNING";
+        List<Map<String, Object>> objects =
+                formatObjects(session.coreRun.getObjects());
 
         List<Map<String, Object>> encounters =
-                detectEncounters(
-                        updatedObjects,
-                        currentTick,
-                        runId
-                );
+                formatEncounters(session.tracker.getEncounters());
 
-        Map<String, Object> updatedRun =
+        Map<String, Object> restoredRun =
                 Map.of(
-                        "runId", run.get("runId"),
-                        "scenarioId",
-                        run.get("scenarioId"),
-                        "status", status,
-                        "currentTick", currentTick,
-                        "elapsedTimeSeconds",
-                        elapsedTime,
-                        "objects", updatedObjects,
+                        "runId", session.runId,
+                        "scenarioId", session.scenarioId,
+                        "status", session.coreRun.getStatus().name(),
+                        "currentTick", session.coreRun.getCurrentTick(),
+                        "elapsedTimeSeconds", session.coreRun.getElapsedTimeSeconds(),
+                        "objects", objects,
                         "encounters", encounters
                 );
 
-        runs.put(runId, updatedRun);
+        runs.put(runId, restoredRun);
+
+        return restoredRun;
+    }
+
+    public Map<String, Object> advanceRun(String runId) {
+
+        ActiveSession session = sessions.get(runId);
+
+        if (session == null) {
+            session = restoreSession(runId);
+        }
+
+        if (session == null) {
+            return null;
+        }
+
+        if (session.coreRun.getStatus()
+                == com.orbitalnet.core.SimulationRun.Status.COMPLETED) {
+            return getRun(runId);
+        }
+
+        if (session.coreRun.getStatus()
+                == com.orbitalnet.core.SimulationRun.Status.PENDING) {
+            session.coreRun.start();
+        }
+
+        session.coreRun.advanceTick();
+
+        int currentTick =
+                session.coreRun.getCurrentTick();
+
+        double elapsedTime =
+                session.coreRun.getElapsedTimeSeconds();
+
+        String status =
+                session.coreRun.getStatus().name();
+
+        if (elapsedTime >= session.durationSeconds
+                && !"COMPLETED".equals(status)) {
+            status = "COMPLETED";
+        }
+
+        List<EncounterDetectionService.DetectedEncounter> detections =
+                detectionService.detect(session.coreRun.getObjects());
+
+        List<com.orbitalnet.core.Encounter> updatedEncounters =
+                session.tracker.processTick(
+                        currentTick,
+                        detections,
+                        session.coreRun.getObjects()
+                );
+
+        for (com.orbitalnet.core.Encounter encounter : updatedEncounters) {
+            if (encounter.getStatus()
+                    == com.orbitalnet.core.Encounter.Status.DETECTED
+                    || encounter.getRiskScore() == null) {
+
+                com.orbitalnet.core.RiskScore score =
+                        riskEngine.assess(encounter);
+
+                encounter.assess(score);
+            }
+        }
+
+        for (com.orbitalnet.core.Encounter encounter : session.tracker.getEncounters()) {
+            if (session.savedEncounterIds.add(encounter.getEncounterId())) {
+
+                try {
+
+                    backend.model.Encounter dbEncounter =
+                            new backend.model.Encounter(
+                                    encounter.getEncounterId(),
+                                    runId,
+                                    encounter.getObjectAId(),
+                                    encounter.getObjectBId(),
+                                    encounter.getMinSeparationKm(),
+                                    encounter.getTimeToClosestApproachSeconds(),
+                                    encounter.getRelativeVelocityKmPerSec(),
+                                    (long) encounter.getDetectedAtTick(),
+                                    encounter.getStatus().name()
+                            );
+
+                    encounterRepository.save(dbEncounter);
+
+                    com.orbitalnet.core.RiskScore risk =
+                            encounter.getRiskScore();
+
+                    if (risk == null) {
+                        risk = riskEngine.assess(encounter);
+                        encounter.assess(risk);
+                    }
+
+                    RiskAssessment dbRisk =
+                            new RiskAssessment(
+                                    encounter.getEncounterId(),
+                                    risk.getTotalScore(),
+                                    risk.getSeparationFactor(),
+                                    risk.getVelocityFactor(),
+                                    risk.getTimeFactor(),
+                                    risk.getExplanation()
+                            );
+
+                    riskAssessmentRepository.save(dbRisk);
+
+                } catch (Exception e) {
+
+                    throw new RuntimeException(
+                            "Failed to save encounter and risk",
+                            e
+                    );
+                }
+            }
+        }
 
         try {
 
@@ -374,385 +468,118 @@ public class SimulationRunService {
             );
         }
 
+        List<Map<String, Object>> updatedObjects =
+                formatObjects(session.coreRun.getObjects());
+
+        List<Map<String, Object>> encounters =
+                formatEncounters(session.tracker.getEncounters());
+
+        Map<String, Object> updatedRun =
+                Map.of(
+                        "runId", runId,
+                        "scenarioId", session.scenarioId,
+                        "status", status,
+                        "currentTick", currentTick,
+                        "elapsedTimeSeconds", elapsedTime,
+                        "objects", updatedObjects,
+                        "encounters", encounters
+                );
+
+        runs.put(runId, updatedRun);
+
         return updatedRun;
     }
 
-    private List<Map<String, Object>> detectEncounters(
-            List<Map<String, Object>> objects,
-            int currentTick,
-            String runId) {
+    private List<Map<String, Object>> formatObjects(
+            List<SpaceObject> spaceObjects) {
 
-        List<Map<String, Object>> encounters =
+        List<Map<String, Object>> list =
                 new ArrayList<>();
 
-        double detectionDistanceKm = 100.0;
-        double horizonSeconds = 3600.0;
+        for (SpaceObject obj : spaceObjects) {
 
-        for (int i = 0;
-             i < objects.size();
-             i++) {
-
-            for (int j = i + 1;
-                 j < objects.size();
-                 j++) {
-
-                Map<String, Object> a =
-                        objects.get(i);
-
-                Map<String, Object> b =
-                        objects.get(j);
-
-                Map<String, Double> posA =
-                        (Map<String, Double>)
-                                a.get("position");
-
-                Map<String, Double> posB =
-                        (Map<String, Double>)
-                                b.get("position");
-
-                Map<String, Double> velA =
-                        (Map<String, Double>)
-                                a.get("velocity");
-
-                Map<String, Double> velB =
-                        (Map<String, Double>)
-                                b.get("velocity");
-
-                double rx =
-                        posB.get("x") - posA.get("x");
-
-                double ry =
-                        posB.get("y") - posA.get("y");
-
-                double rz =
-                        posB.get("z") - posA.get("z");
-
-                double vx =
-                        velB.get("x") - velA.get("x");
-
-                double vy =
-                        velB.get("y") - velA.get("y");
-
-                double vz =
-                        velB.get("z") - velA.get("z");
-
-                double velocitySquared =
-                        vx * vx
-                        + vy * vy
-                        + vz * vz;
-
-                double timeToClosestApproach = 0.0;
-
-                if (velocitySquared > 0.0) {
-
-                    timeToClosestApproach =
-                            -(rx * vx
-                            + ry * vy
-                            + rz * vz)
-                            / velocitySquared;
-                }
-
-                timeToClosestApproach =
-                        Math.max(
-                                0.0,
-                                Math.min(
-                                        horizonSeconds,
-                                        timeToClosestApproach
-                                )
-                        );
-
-                double closestX =
-                        rx
-                        + vx * timeToClosestApproach;
-
-                double closestY =
-                        ry
-                        + vy * timeToClosestApproach;
-
-                double closestZ =
-                        rz
-                        + vz * timeToClosestApproach;
-
-                double minSeparationKm =
-                        Math.sqrt(
-                                closestX * closestX
-                                + closestY * closestY
-                                + closestZ * closestZ
-                        );
-
-                if (minSeparationKm <=
-                        detectionDistanceKm) {
-
-                    double relativeVelocity =
-                            Math.sqrt(
-                                    velocitySquared
-                            );
-
-                    double separationFactor =
-                            Math.max(
-                                    0.0,
-                                    Math.min(
-                                            1.0,
-                                            1.0
-                                            - minSeparationKm
-                                            / 100.0
-                                    )
-                            );
-
-                    double velocityFactor =
-                            Math.max(
-                                    0.0,
-                                    Math.min(
-                                            1.0,
-                                            relativeVelocity
-                                            / 15.0
-                                    )
-                            );
-
-                    double timeFactor =
-                            1.0
-                            - Math.max(
-                                    0.0,
-                                    Math.min(
-                                            1.0,
-                                            timeToClosestApproach
-                                            / horizonSeconds
-                                    )
-                            );
-
-                    int riskScore =
-                            (int) Math.round(
-                                    100.0 * (
-                                            0.50
-                                            * separationFactor
-                                            + 0.30
-                                            * velocityFactor
-                                            + 0.20
-                                            * timeFactor
-                                    )
-                            );
-
-                    String objectAId =
-                            (String) a.get("id");
-
-                    String objectBId =
-                            (String) b.get("id");
-
-                    String existingEncounterId =
-                            findExistingEncounterId(
-                                    runId,
-                                    objectAId,
-                                    objectBId
-                            );
-
-                    if (existingEncounterId == null) {
-
-                        String encounterId =
-                                UUID.randomUUID()
-                                        .toString();
-
-                        Encounter encounter =
-                                new Encounter(
-                                        encounterId,
-                                        runId,
-                                        objectAId,
-                                        objectBId,
-                                        minSeparationKm,
-                                        timeToClosestApproach,
-                                        relativeVelocity,
-                                        currentTick,
-                                        "DETECTED"
-                                );
-
-                        RiskAssessment risk =
-                                new RiskAssessment(
-                                        encounterId,
-                                        riskScore,
-                                        separationFactor,
-                                        velocityFactor,
-                                        timeFactor,
-                                        createRiskExplanation(
-                                                riskScore
-                                        )
-                                );
-
-                        try {
-
-                            encounterRepository.save(
-                                    encounter
-                            );
-
-                            riskAssessmentRepository.save(
-                                    risk
-                            );
-
-                        } catch (Exception e) {
-
-                            throw new RuntimeException(
-                                    "Failed to save encounter and risk",
-                                    e
-                            );
-                        }
-
-                        encounters.add(
-                                createEncounterResponse(
-                                        encounter,
-                                        risk
-                                )
-                        );
-
-                    } else {
-
-                        encounters.add(
-                                createExistingEncounterResponse(
-                                        existingEncounterId,
-                                        runId,
-                                        objectAId,
-                                        objectBId,
-                                        minSeparationKm,
-                                        timeToClosestApproach,
-                                        relativeVelocity,
-                                        riskScore,
-                                        currentTick
-                                )
-                        );
-                    }
-                }
-            }
-        }
-
-        return encounters;
-    }
-
-    private String findExistingEncounterId(
-            String runId,
-            String objectAId,
-            String objectBId) {
-
-        try {
-
-            List<Encounter> existing =
-                    encounterRepository.findByRunId(runId);
-
-            for (Encounter encounter : existing) {
-
-                boolean sameOrder =
-                        encounter.getObjectAId()
-                                .equals(objectAId)
-                        && encounter.getObjectBId()
-                                .equals(objectBId);
-
-                boolean reverseOrder =
-                        encounter.getObjectAId()
-                                .equals(objectBId)
-                        && encounter.getObjectBId()
-                                .equals(objectAId);
-
-                if (sameOrder || reverseOrder) {
-                    return encounter.getEncounterId();
-                }
-            }
-
-            return null;
-
-        } catch (Exception e) {
-
-            throw new RuntimeException(
-                    "Failed to check existing encounters",
-                    e
+            Map<String, Double> position = Map.of(
+                    "x", obj.getPosition().getX(),
+                    "y", obj.getPosition().getY(),
+                    "z", obj.getPosition().getZ()
             );
+
+            Map<String, Double> velocity = Map.of(
+                    "x", obj.getVelocity().getX(),
+                    "y", obj.getVelocity().getY(),
+                    "z", obj.getVelocity().getZ()
+            );
+
+            Map<String, Object> objectMap = Map.of(
+                    "id", obj.getId(),
+                    "type", obj.getType().name(),
+                    "status", obj.getStatus().name(),
+                    "size", obj.getSize(),
+                    "position", position,
+                    "velocity", velocity
+            );
+
+            list.add(objectMap);
         }
+
+        return list;
     }
 
-    private Map<String, Object> createEncounterResponse(
-            Encounter encounter,
-            RiskAssessment risk) {
+    private List<Map<String, Object>> formatEncounters(
+            List<com.orbitalnet.core.Encounter> coreEncounters) {
 
-        return Map.of(
-                "encounterId",
-                encounter.getEncounterId(),
+        List<Map<String, Object>> list =
+                new ArrayList<>();
 
-                "objectAId",
-                encounter.getObjectAId(),
+        for (com.orbitalnet.core.Encounter enc : coreEncounters) {
 
-                "objectBId",
-                encounter.getObjectBId(),
+            int score = enc.getRiskScore() != null
+                    ? enc.getRiskScore().getTotalScore()
+                    : 0;
 
-                "minSeparationKm",
-                encounter.getMinSeparationKm(),
+            Map<String, Object> map = Map.of(
+                    "encounterId", enc.getEncounterId(),
+                    "objectAId", enc.getObjectAId(),
+                    "objectBId", enc.getObjectBId(),
+                    "minSeparationKm", enc.getMinSeparationKm(),
+                    "timeToClosestApproachSeconds", enc.getTimeToClosestApproachSeconds(),
+                    "relativeVelocityKmPerSec", enc.getRelativeVelocityKmPerSec(),
+                    "riskScore", score,
+                    "status", enc.getStatus().name(),
+                    "detectedAtTick", (long) enc.getDetectedAtTick()
+            );
 
-                "timeToClosestApproachSeconds",
-                encounter.getTimeToClosestApproachSeconds(),
+            list.add(map);
+        }
 
-                "relativeVelocityKmPerSec",
-                encounter.getRelativeVelocityKmPerSec(),
-
-                "riskScore",
-                risk.getTotalScore(),
-
-                "status",
-                encounter.getStatus(),
-
-                "detectedAtTick",
-                encounter.getDetectedAtTick()
-        );
+        return list;
     }
 
-    private Map<String, Object> createExistingEncounterResponse(
-            String encounterId,
-            String runId,
-            String objectAId,
-            String objectBId,
-            double minSeparationKm,
-            double timeToClosestApproach,
-            double relativeVelocity,
-            int riskScore,
-            int currentTick) {
+    public List<SpaceObject> getCoreObjects(String runId) {
 
-        return Map.of(
-                "encounterId",
-                encounterId,
+        ActiveSession session = sessions.get(runId);
 
-                "objectAId",
-                objectAId,
+        if (session == null) {
+            session = restoreSession(runId);
+        }
 
-                "objectBId",
-                objectBId,
+        if (session == null) {
+            return List.of();
+        }
 
-                "minSeparationKm",
-                minSeparationKm,
-
-                "timeToClosestApproachSeconds",
-                timeToClosestApproach,
-
-                "relativeVelocityKmPerSec",
-                relativeVelocity,
-
-                "riskScore",
-                riskScore,
-
-                "status",
-                "DETECTED",
-
-                "detectedAtTick",
-                currentTick
-        );
+        return session.coreRun.getObjects();
     }
 
-    private String createRiskExplanation(int riskScore) {
+    public com.orbitalnet.core.Encounter getCoreEncounter(String encounterId) {
 
-        if (riskScore >= 75) {
-            return "Critical risk";
+        for (ActiveSession session : sessions.values()) {
+            for (com.orbitalnet.core.Encounter e : session.tracker.getEncounters()) {
+                if (e.getEncounterId().equals(encounterId)) {
+                    return e;
+                }
+            }
         }
 
-        if (riskScore >= 50) {
-            return "High risk";
-        }
-
-        if (riskScore >= 25) {
-            return "Moderate risk";
-        }
-
-        return "Low risk";
+        return null;
     }
 }

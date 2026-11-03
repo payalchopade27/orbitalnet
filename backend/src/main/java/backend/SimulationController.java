@@ -65,7 +65,7 @@ public class SimulationController {
         return run;
     }
 
-    @PostMapping("/{runId}/advance")
+    @PostMapping({"/{runId}/advance", "/{runId}/step"})
     public Map<String, Object> advanceSimulation(
             @PathVariable String runId) {
 
