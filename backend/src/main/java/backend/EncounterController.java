@@ -20,6 +20,7 @@ import java.sql.*;
 import java.util.*;
 
 @RestController
+@CrossOrigin(origins = "http://localhost:5173")
 @RequestMapping("/api/encounters")
 public class EncounterController {
 
@@ -453,6 +454,7 @@ public class EncounterController {
 
             return ResponseEntity.ok(candidates);
 
+        
         } catch (Exception e) {
 
             return ResponseEntity
@@ -460,6 +462,65 @@ public class EncounterController {
                     .body(e.getMessage());
         }
     }
+
+    // =========================================================
+    // GET EXISTING MANEUVER CANDIDATES (READ-ONLY)
+    // =========================================================
+
+    @GetMapping("/{encounterId}/maneuvers")
+    public ResponseEntity<?> getManeuverCandidates(
+            @PathVariable String encounterId) {
+
+        // 1. Validate UUID format
+        try {
+            UUID.fromString(encounterId);
+        } catch (IllegalArgumentException ex) {
+            return ResponseEntity.badRequest()
+                    .body("Invalid encounterId format; must be a UUID.");
+        }
+
+        try {
+
+            // 2. Verify that the encounter exists
+            boolean exists = false;
+
+            for (Encounter e : encounterRepository
+                    .findByRunId(getRunIdFromEncounter(encounterId))) {
+
+                if (e.getEncounterId().equals(encounterId)) {
+                    exists = true;
+                    break;
+                }
+            }
+
+            if (!exists) {
+                return ResponseEntity.notFound().build();
+            }
+
+            // 3. Retrieve existing candidates (SELECT only)
+            List<ManeuverCandidate> candidates =
+                    maneuverCandidateRepository.findByEncounterId(encounterId);
+
+            // 4. Convert candidates into JSON response
+            List<Map<String, Object>> response = new ArrayList<>();
+
+            for (ManeuverCandidate candidate : candidates) {
+                response.add(candidateMap(candidate));
+            }
+
+            // 5. Return candidates, or [] if none exist
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError()
+                    .body("Failed to retrieve maneuver candidates");
+        }
+    }
+
+    // =========================================================
+    // APPLY MANEUVER
+    // =========================================================
+
 
     // =========================================================
     // APPLY MANEUVER

@@ -12,9 +12,12 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
+
+
 @RestController
-@RequestMapping("/api/simulations")
 @CrossOrigin(origins = "http://localhost:5173")
+@RequestMapping("/api/simulations")
+
 public class SimulationController {
 
     private final SimulationRunService simulationRunService;

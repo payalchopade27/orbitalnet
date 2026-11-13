@@ -11,6 +11,7 @@ import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 @RestController
+@CrossOrigin(origins = "http://localhost:5173")
 @RequestMapping("/api/benchmarks")
 public class BenchmarkController {
 
