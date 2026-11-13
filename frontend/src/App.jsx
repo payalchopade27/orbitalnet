@@ -19,6 +19,7 @@ const api = (path) => `${API_BASE_URL}${path}`;
 import { useState, useEffect, useRef } from "react";
 import ScenarioControls from "./components/ScenarioControls";
 import MetricCard from "./components/MetricCard"; // assuming this component exists
+import OrbitVisualization from "./components/OrbitVisualization";
 
 function formatTime(seconds) {
   const totalSeconds = Math.max(0, Math.floor(seconds || 0));
@@ -49,11 +50,9 @@ function App() {
   const [objectTypeFilter, setObjectTypeFilter] = useState("ALL");
   const [selectedObject, setSelectedObject] = useState(null);
   const [selectedEncounter, setSelectedEncounter] = useState(null);
-  const [maneuverCandidates, setManeuverCandidates] = useState([]);
-  const [maneuverLoading, setManeuverLoading] = useState(false);
-  const [maneuverMessage, setManeuverMessage] = useState("");
   const [currentTick, setCurrentTick] = useState(0);
   const [isAutoRunning, setIsAutoRunning] = useState(false);
+  const [isFullScreen, setIsFullScreen] = useState(false);
   const stepInProgress = useRef(false);
 
   const filteredEncounters = encounters
@@ -204,45 +203,16 @@ function App() {
     return () => clearTimeout(timeoutId);
   }, [isAutoRunning, runId, simulationStatus, currentTick]);
 
-  // Fetch saved maneuver candidates when an encounter is selected
   useEffect(() => {
-    let ignored = false;
-    if (!selectedEncounter) {
-      setManeuverCandidates([]);
-      setManeuverMessage("");
-      setManeuverLoading(false);
-      return;
-    }
-    setManeuverLoading(true);
-    setManeuverMessage("");
-    fetch(api(`/api/encounters/${selectedEncounter.encounterId}/maneuvers`))
-      .then((response) => {
-        if (!response.ok) {
-          return response.json().then((err) => {
-            throw new Error(err?.error || "Failed to load maneuver candidates");
-          });
-        }
-        return response.json();
-      })
-      .then((data) => {
-        if (ignored) return;
-        setManeuverCandidates(data);
-        if (Array.isArray(data) && data.length === 0) {
-          setManeuverMessage("No saved maneuver candidates for this encounter.");
-        }
-      })
-      .catch((err) => {
-        if (ignored) return;
-        console.error(err);
-        setManeuverMessage(err.message || "Failed to load maneuver candidates.");
-      })
-      .finally(() => {
-        if (!ignored) setManeuverLoading(false);
-      });
-    return () => {
-      ignored = true;
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape" && isFullScreen) {
+        setIsFullScreen(false);
+      }
     };
-  }, [selectedEncounter]);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isFullScreen]);
+
 
   return (
     <div className="app-shell">
@@ -379,52 +349,15 @@ function App() {
               <span className="tag">DEMO</span>
             </div>
 
-            <div className="space-view">
-              <div className="stars">
-                {Array.from({ length: 35 }, (_, i) => (
-                  <span
-                    key={i}
-                    style={{
-                      left: `${(i * 37 + 11) % 97}%`,
-                      top: `${(i * 53 + 7) % 91}%`,
-                      opacity: 0.3 + ((i * 7) % 7) / 10,
-                    }}
-                  />
-                ))}
-              </div>
-              <div className="space-orbit orbit-a" />
-              <div className="space-orbit orbit-b" />
-              <div className="space-orbit orbit-c" />
-              <div className="earth">
-                <div className="earth-glow" />
-              </div>
-
-              {trackedObjects.map((object) => {
-                const x = Number(object.position?.x ?? 0);
-                const y = Number(object.position?.y ?? 0);
-                const left = 5 + ((x + 10000) / 20000) * 90;
-                const top = 95 - ((y + 10000) / 20000) * 90;
-                const safeLeft = Math.max(5, Math.min(95, left));
-                const safeTop = Math.max(5, Math.min(95, top));
-                const isDebris = object.type === "DEBRIS";
-                return (
-                  <div
-                    key={object.id}
-                    className={`object-point ${isDebris ? "debris-point" : "satellite-point"} ${selectedObject?.id === object.id ? "selected-point" : ""}`}
-                    style={{ left: `${safeLeft}%`, top: `${safeTop}%` }}
-                    title={`${object.id} (${object.type})`}
-                    onClick={() => setSelectedObject(object)}
-                    role="button"
-                    tabIndex={0}
-                    aria-label={`Select ${object.id}`}
-                  />
-                );
-              })}
-
-              <div className="orbit-legend">
-                <span><i className="legend-blue" /> Satellites</span>
-                <span><i className="legend-orange" /> Debris</span>
-              </div>
+            <div className={`orbit-3d-wrapper ${isFullScreen ? "fullscreen" : ""}`}>
+              <OrbitVisualization
+                trackedObjects={trackedObjects}
+                selectedObject={selectedObject}
+                onSelectObject={setSelectedObject}
+                selectedEncounter={selectedEncounter}
+                isFullScreen={isFullScreen}
+                onToggleFullScreen={() => setIsFullScreen((prev) => !prev)}
+              />
             </div>
 
             <div className="simulation-footer">
@@ -611,11 +544,29 @@ function App() {
               </tbody>
             </table>
           </div>
-          {selectedEncounter && maneuverLoading && <p>Loading maneuvers...</p>}
-          {selectedEncounter && maneuverMessage && <p>{maneuverMessage}</p>}
-          {selectedEncounter && maneuverCandidates.length > 0 && (
-            <div className="maneuver-candidates">
-              {/* Render maneuver candidates as needed */}
+          {selectedEncounter && (
+            <div className="panel encounter-details-panel">
+              <div className="panel-heading">
+                <div>
+                  <h3>Encounter Details</h3>
+                  <p>Review the selected close approach</p>
+                </div>
+                <button
+                  className="secondary-button"
+                  onClick={() => setSelectedEncounter(null)}
+                >
+                  Close
+                </button>
+              </div>
+              <div className="selected-object-details">
+                <p><strong>Encounter ID:</strong> {selectedEncounter.encounterId}</p>
+                <p><strong>Object A:</strong> {selectedEncounter.objectAId ?? "N/A"}</p>
+                <p><strong>Object B:</strong> {selectedEncounter.objectBId ?? "N/A"}</p>
+                <p><strong>Miss distance:</strong> {selectedEncounter.minSeparationKm !== undefined ? `${Number(selectedEncounter.minSeparationKm).toFixed(2)} km` : "N/A"}</p>
+                <p><strong>Time to closest approach:</strong> {selectedEncounter.timeToClosestApproachSeconds !== undefined ? `${Number(selectedEncounter.timeToClosestApproachSeconds).toFixed(2)} seconds` : "N/A"}</p>
+                <p><strong>Risk score:</strong> {Number(selectedEncounter.riskScore ?? 0)}</p>
+                <p><strong>Risk level:</strong> {getRiskLevel(Number(selectedEncounter.riskScore ?? 0))}</p>
+              </div>
             </div>
           )}
         </section>
