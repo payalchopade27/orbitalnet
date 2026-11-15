@@ -1,27 +1,8 @@
-/* Placeholder CSS for MetricCard component */
-.metric-card {
-  display: flex;
-  align-items: center;
-  padding: 8px;
-  border-radius: 4px;
-  background-color: #f5f5f5;
-  margin: 4px 0;
-}
-.metric-icon {
-  margin-right: 8px;
-}
-.metric-content {
-  display: flex;
-  flex-direction: column;
-}
-.metric-label {
-  font-weight: bold;
-}
-.metric-value {
-  font-size: 1.2em;
-}
-.metric-note {
-  font-size: 0.9em;
-  color: #666;
-}
+/* MetricCard.css — dark dashboard theme (delegates icon-color to App.css) */
+/* The heavy lifting is in App.css: .metric-card, .metric-icon, etc.           */
+/* This file only adds the color-class icon backgrounds on .metric-card        */
 
+.metric-card.blue  .metric-icon { background: #172c49; color: #70b6ff; }
+.metric-card.purple .metric-icon { background: #2a214b; color: #b29aff; }
+.metric-card.orange .metric-icon { background: #39251f; color: #ffae7b; }
+.metric-card.green  .metric-icon { background: #15352e; color: #6ce3b5; }

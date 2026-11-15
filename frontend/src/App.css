@@ -1240,3 +1240,150 @@ tbody tr:hover {
   pointer-events: none;
 }
 
+
+
+/* ── Scenario Result Grid ─────────────────────────────────────── */
+.scenario-result {
+  margin-bottom: 23px;
+}
+
+.scenario-result-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+  padding: 0 21px 21px;
+}
+
+.result-card {
+  background: #111b2c;
+  border: 1px solid #293852;
+  border-radius: 10px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.result-label {
+  color: #7787a3;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.result-value {
+  color: #f1f5f9;
+  font-size: 18px;
+  font-family: "Space Grotesk", sans-serif;
+  font-weight: 600;
+}
+
+@media (max-width: 650px) {
+  .scenario-result-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* ── Selected Object Panel Redesign ───────────────────────────── */
+.selected-object-body {
+  padding: 16px 20px 20px;
+}
+
+.object-meta-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-bottom: 20px;
+}
+
+.object-meta-item {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.object-meta-item.full-width {
+  grid-column: 1 / -1;
+}
+
+.meta-label {
+  color: #7787a3;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.meta-value {
+  color: #f1f5f9;
+  font-size: 15px;
+}
+
+.meta-value.mono {
+  font-family: "Space Mono", "Space Grotesk", monospace;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.vector-group {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid #1e2d44;
+}
+
+.vector-heading {
+  margin: 0 0 12px;
+  color: #93a8ff;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.coords-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.coord-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #111b2c;
+  border: 1px solid #1e2d44;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.axis-tag {
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  min-width: 14px;
+}
+
+.coord-val {
+  color: #e2e8f0;
+  font-family: "Space Mono", "Space Grotesk", monospace;
+  font-size: 14px;
+}
+
+@media (max-width: 600px) {
+  .object-meta-grid {
+    grid-template-columns: 1fr;
+  }
+  .coords-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ── Encounter Details full-width ID ──────────────────────────── */
+.selected-object-details .full-width {
+  grid-column: 1 / -1;
+}
+
+/* ── Disabled Button States ───────────────────────────────────── */
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  pointer-events: none;
+}

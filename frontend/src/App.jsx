@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   Gauge,
   Play,
+  Square,
   Radar,
   ShieldCheck,
   CircleDot,
@@ -20,16 +21,6 @@ import { useState, useEffect, useRef } from "react";
 import ScenarioControls from "./components/ScenarioControls";
 import MetricCard from "./components/MetricCard"; // assuming this component exists
 import OrbitVisualization from "./components/OrbitVisualization";
-
-function formatTime(seconds) {
-  const totalSeconds = Math.max(0, Math.floor(seconds || 0));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const remainingSeconds = totalSeconds % 60;
-  return [hours, minutes, remainingSeconds]
-    .map((value) => String(value).padStart(2, "0"))
-    .join(":");
-}
 
 function getRiskLevel(score) {
   if (score >= 70) return "High";
@@ -53,6 +44,7 @@ function App() {
   const [currentTick, setCurrentTick] = useState(0);
   const [isAutoRunning, setIsAutoRunning] = useState(false);
   const [isFullScreen, setIsFullScreen] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
   const stepInProgress = useRef(false);
 
   const filteredEncounters = encounters
@@ -77,7 +69,7 @@ function App() {
     return matchesSearch && matchesType;
   });
 
-  const generateScenario = async (settings) => {
+  const generateScenario = async (settings = { satellites: 10, debris: 20, duration: 60 }) => {
     setIsAutoRunning(false);
     setRunId(null);
     setEncounters([]);
@@ -86,85 +78,83 @@ function App() {
     setSimulationStatus("Ready to run");
 
     try {
-      const response = await fetch(
-        "http://localhost:8080/api/scenarios/generate",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            satellites: settings.satellites,
-            debris: settings.debris,
-            duration: settings.duration,
-          }),
-        }
-      );
+      const response = await fetch(api("/api/scenarios/generate"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          satellites: Number(settings.satellites ?? 10),
+          debris: Number(settings.debris ?? 20),
+          duration: Number(settings.duration ?? 60),
+        }),
+      });
       if (!response.ok) {
         throw new Error("Failed to generate scenario");
       }
       const data = await response.json();
       console.log("Backend response:", data);
       setScenario(data);
+      return data;
     } catch (error) {
       console.error("Error:", error);
       setMessage("Could not generate the scenario. Check the backend.");
       setSimulationStatus("Failed");
+      return null;
     }
   };
 
-  async function runSimulation() {
-    if (!scenario) {
-      setMessage("Please generate a scenario first.");
-      return;
+  async function runSimulation(param = null, autoRun = true) {
+    let sc = (param && param.scenarioId) ? param : scenario;
+    if (!sc || !sc.scenarioId) {
+      const config = (param && param.satellites)
+        ? { satellites: param.satellites, debris: param.debris, duration: param.duration }
+        : { satellites: 10, debris: 20, duration: 60 };
+      sc = await generateScenario(config);
+      if (!sc) return null;
     }
     try {
       setSimulationStatus("Starting...");
-      const response = await fetch(
-        `http://localhost:8080/api/simulations/${scenario.scenarioId}/run`,
-        {
-          method: "POST",
-        }
-      );
+      const response = await fetch(api(`/api/simulations/${sc.scenarioId}/run`), {
+        method: "POST",
+      });
       if (!response.ok) {
         throw new Error("Failed to start simulation");
       }
       const data = await response.json();
       setSimulationStatus(data.status);
-      setIsAutoRunning(true);
       setRunId(data.runId);
       setCurrentTick(0);
       setEncounters([]);
       setTrackedObjects([]);
-      const stateResponse = await fetch(
-        `http://localhost:8080/api/simulations/${data.runId}/state`
-      );
+      const stateResponse = await fetch(api(`/api/simulations/${data.runId}/state`));
       if (!stateResponse.ok) {
         throw new Error("Failed to fetch tracked objects");
       }
       const stateData = await stateResponse.json();
       setTrackedObjects(stateData.objects || []);
       setMessage(data.message || "Simulation started successfully.");
+      setIsAutoRunning(autoRun);
       console.log("Tracked objects:", stateData.objects);
       console.log("Simulation Run ID:", data.runId);
+      return data.runId;
     } catch (error) {
       console.error("Simulation error:", error);
       setSimulationStatus("Failed");
       setMessage(error.message || "Could not start simulation. Check the backend.");
       setIsAutoRunning(false);
+      return null;
     }
   }
 
-  async function stepSimulation() {
-    if (!runId) {
-      setMessage("Please generate a scenario and run the simulation first.");
-      return;
+  async function stepSimulation(targetRunId = null) {
+    let currentId = targetRunId || runId;
+    if (!currentId || simulationStatus === "COMPLETED" || simulationStatus === "Failed") {
+      currentId = await runSimulation(scenario, false);
+      if (!currentId) return;
     }
     try {
-      const response = await fetch(
-        `http://localhost:8080/api/simulations/${runId}/step`,
-        {
-          method: "POST",
-        }
-      );
+      const response = await fetch(api(`/api/simulations/${currentId}/step`), {
+        method: "POST",
+      });
       if (!response.ok) {
         throw new Error("Failed to advance simulation");
       }
@@ -184,6 +174,33 @@ function App() {
       setSimulationStatus("Failed");
       setMessage(error.message || "Could not advance simulation.");
       setIsAutoRunning(false);
+    }
+  }
+
+  function handleStopSimulation() {
+    setIsAutoRunning(false);
+    setSimulationStatus("STOPPED");
+    setMessage("Simulation stopped.");
+  }
+
+  async function handleToggleAutoRun() {
+    if (isAutoRunning) {
+      setIsAutoRunning(false);
+      setSimulationStatus("PAUSED");
+      setMessage("Simulation paused.");
+      return;
+    }
+    if (isProcessing) return;
+    setIsProcessing(true);
+    try {
+      if (!runId || simulationStatus === "COMPLETED" || simulationStatus === "Failed") {
+        await runSimulation(scenario, true);
+      } else {
+        setSimulationStatus("RUNNING");
+        setIsAutoRunning(true);
+      }
+    } finally {
+      setIsProcessing(false);
     }
   }
 
@@ -320,7 +337,10 @@ function App() {
           />
         </section>
 
-        <ScenarioControls onGenerate={generateScenario} onRun={runSimulation} />
+        <ScenarioControls
+          onGenerate={generateScenario}
+          onRun={(cfg) => runSimulation(cfg, true)}
+        />
 
         {message && (
           <div className="panel scenario-message" role="status">
@@ -331,11 +351,33 @@ function App() {
 
         {scenario && (
           <div className="panel scenario-result">
-            <h3>Scenario Generated Successfully</h3>
-            <p>Status: {scenario.status}</p>
-            <p>Satellites: {scenario.satellites}</p>
-            <p>Debris: {scenario.debris}</p>
-            <p>Duration: {scenario.duration} minutes</p>
+            <div className="panel-heading">
+              <div>
+                <h3>Scenario Generated Successfully</h3>
+                <p>Configuration overview</p>
+              </div>
+              <span className={`status-pill ${scenario.status === "READY" ? "" : "warning"}`}>
+                {scenario.status}
+              </span>
+            </div>
+            <div className="scenario-result-grid">
+              <div className="result-card">
+                <span className="result-label">Status</span>
+                <span className="result-value">{scenario.status}</span>
+              </div>
+              <div className="result-card">
+                <span className="result-label">Satellites</span>
+                <span className="result-value">{scenario.satellites}</span>
+              </div>
+              <div className="result-card">
+                <span className="result-label">Debris Objects</span>
+                <span className="result-value">{scenario.debris}</span>
+              </div>
+              <div className="result-card">
+                <span className="result-label">Duration</span>
+                <span className="result-value">{scenario.duration} min</span>
+              </div>
+            </div>
           </div>
         )}
 
@@ -371,24 +413,17 @@ function App() {
               <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
                 <button
                   className="secondary-button"
-                  onClick={stepSimulation}
-                  disabled={
-                    !runId ||
-                    simulationStatus === "COMPLETED" ||
-                    simulationStatus === "Failed" ||
-                    isAutoRunning
-                  }
+                  onClick={handleStopSimulation}
+                  disabled={isProcessing}
+                  title="Stop simulation"
                 >
-                  <Play size={15} /> Step Simulation
+                  <Square size={13} fill="currentColor" /> Stop Simulation
                 </button>
                 <button
                   className="primary-button"
-                  onClick={() => setIsAutoRunning((prev) => !prev)}
-                  disabled={
-                    !runId ||
-                    simulationStatus === "COMPLETED" ||
-                    simulationStatus === "Failed"
-                  }
+                  onClick={handleToggleAutoRun}
+                  disabled={isProcessing}
+                  title={isAutoRunning ? "Pause simulation" : "Start continuous simulation"}
                 >
                   {isAutoRunning ? "Pause Auto Run" : "Start Auto Run"}
                 </button>
@@ -407,19 +442,54 @@ function App() {
                   Close
                 </button>
               </div>
-              <div className="panel-body">
-                <div className="selected-object-details">
-                  <p><strong>ID:</strong> {selectedObject.id}</p>
-                  <p><strong>Type:</strong> {selectedObject.type === "DEBRIS" ? "Space debris" : "Active satellite"}</p>
-                  <p><strong>Status:</strong> {selectedObject.status}</p>
-                  <h4>Position</h4>
-                  <p>X: {Number(selectedObject.position?.x ?? 0).toFixed(2)}</p>
-                  <p>Y: {Number(selectedObject.position?.y ?? 0).toFixed(2)}</p>
-                  <p>Z: {Number(selectedObject.position?.z ?? 0).toFixed(2)}</p>
-                  <h4>Velocity</h4>
-                  <p>X: {Number(selectedObject.velocity?.x ?? 0).toFixed(2)}</p>
-                  <p>Y: {Number(selectedObject.velocity?.y ?? 0).toFixed(2)}</p>
-                  <p>Z: {Number(selectedObject.velocity?.z ?? 0).toFixed(2)}</p>
+              <div className="selected-object-body">
+                <div className="object-meta-grid">
+                  <div className="object-meta-item full-width">
+                    <span className="meta-label">Object ID</span>
+                    <span className="meta-value mono">{selectedObject.id}</span>
+                  </div>
+                  <div className="object-meta-item">
+                    <span className="meta-label">Type</span>
+                    <span className="meta-value">{selectedObject.type === "DEBRIS" ? "Space debris" : "Active satellite"}</span>
+                  </div>
+                  <div className="object-meta-item">
+                    <span className="meta-label">Status</span>
+                    <span className="meta-value">{selectedObject.status}</span>
+                  </div>
+                </div>
+                <div className="vector-group">
+                  <h4 className="vector-heading">Position</h4>
+                  <div className="coords-grid">
+                    <div className="coord-item">
+                      <span className="axis-tag">X</span>
+                      <span className="coord-val">{Number(selectedObject.position?.x ?? 0).toFixed(2)}</span>
+                    </div>
+                    <div className="coord-item">
+                      <span className="axis-tag">Y</span>
+                      <span className="coord-val">{Number(selectedObject.position?.y ?? 0).toFixed(2)}</span>
+                    </div>
+                    <div className="coord-item">
+                      <span className="axis-tag">Z</span>
+                      <span className="coord-val">{Number(selectedObject.position?.z ?? 0).toFixed(2)}</span>
+                    </div>
+                  </div>
+                </div>
+                <div className="vector-group">
+                  <h4 className="vector-heading">Velocity</h4>
+                  <div className="coords-grid">
+                    <div className="coord-item">
+                      <span className="axis-tag">X</span>
+                      <span className="coord-val">{Number(selectedObject.velocity?.x ?? 0).toFixed(2)}</span>
+                    </div>
+                    <div className="coord-item">
+                      <span className="axis-tag">Y</span>
+                      <span className="coord-val">{Number(selectedObject.velocity?.y ?? 0).toFixed(2)}</span>
+                    </div>
+                    <div className="coord-item">
+                      <span className="axis-tag">Z</span>
+                      <span className="coord-val">{Number(selectedObject.velocity?.z ?? 0).toFixed(2)}</span>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>

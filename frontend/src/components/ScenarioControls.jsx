@@ -15,6 +15,14 @@ export default function ScenarioControls({ onGenerate, onRun }) {
     });
   }
 
+  function handleRun() {
+    onRun({
+      satellites: Number(satellites),
+      debris: Number(debris),
+      duration: Number(duration),
+    });
+  }
+
   return (
     <section className="panel scenario-controls">
       <div className="panel-heading">
@@ -65,7 +73,7 @@ export default function ScenarioControls({ onGenerate, onRun }) {
             Generate scenario
           </button>
 
-          <button className="secondary-button" onClick={onRun}>
+          <button className="secondary-button" onClick={handleRun}>
             <Play size={15} />
             Run simulation
           </button>
